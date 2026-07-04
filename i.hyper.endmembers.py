@@ -793,11 +793,33 @@ def identify_endmembers(E: np.ndarray, field_names: list[str], *, library: str,
     n = E.shape[0]
     tmp_csv = gs.tempfile()
     tmp_json = gs.tempfile()
+    n_out_of_range = 0
     with open(tmp_csv, 'w', newline='') as f:
         writer = csv_module.writer(f)
         writer.writerow(['x', 'y'] + field_names)
         for i in range(n):
-            writer.writerow([0, 0] + [f"{v:.6f}" for v in E[i]])
+            row = [0, 0]
+            for v in E[i]:
+                if 0.0 <= v <= 1.0:
+                    row.append(f"{v:.6f}")
+                else:
+                    # Outside the physical reflectance range -- a known
+                    # retrieval artifact (e.g. a water-vapor-absorption
+                    # band), not a real measurement. Left blank rather
+                    # than written as "nan": i.hyper.speclookup's CSV
+                    # reader does float(cell), and the literal string
+                    # "nan" parses successfully (same pitfall fixed
+                    # earlier in the harvesters' own parsing) -- a blank
+                    # cell instead raises ValueError there and is
+                    # correctly skipped, dropping just that one band from
+                    # this endmember's query rather than corrupting the
+                    # comparison with a bogus value.
+                    row.append('')
+                    n_out_of_range += 1
+            writer.writerow(row)
+    if n_out_of_range:
+        gs.verbose(f"Excluded {n_out_of_range} out-of-range (outside 0.0-1.0) "
+                  "reflectance value(s) from the identification query.")
 
     kwargs = dict(
         query_csv=tmp_csv, output=tmp_json, output_format='json',
