@@ -1088,7 +1088,12 @@ def main(options, flags):
             )
 
     if make_plot:
-        plot_name = f"{output_vector or input_map}_endmembers.png"
+        plot_base = output_vector or input_map
+        # Avoid a redundant "..._endmembers_endmembers.png" when the base
+        # name (typically the user's own chosen output= vector name)
+        # already contains "endmember".
+        suffix = "" if "endmember" in plot_base.lower() else "_endmembers"
+        plot_name = f"{plot_base}{suffix}_spectra.png"
         plot_path = os.path.join(plot_dir, plot_name)
         plot_endmembers(wavelengths, wavelength_unit, E, matches, input_map,
                         extraction_method, plot_path, plot_interactive)
