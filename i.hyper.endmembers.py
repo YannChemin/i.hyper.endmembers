@@ -177,7 +177,16 @@
 # % type: integer
 # % required: no
 # % answer: 5
-# % description: Minimum overlapping bands required to consider a library candidate during identification. Only used with -i
+# % description: Minimum overlapping bands required to consider a library candidate during identification (absolute floor). Only used with -i
+# % guisection: Identification
+# %end
+
+# %option
+# % key: spec_min_overlap_fraction
+# % type: double
+# % required: no
+# % answer: 0.15
+# % description: Minimum overlapping bands required, as a fraction (0-1) of the cube's own band count -- both this and spec_min_overlap_bands must be satisfied. An absolute floor alone does not scale to a hyperspectral cube: e.g. 13 overlapping bands is a weak, edge-of-range match out of 255 EMIT bands. Only used with -i
 # % guisection: Identification
 # %end
 
@@ -763,7 +772,8 @@ _LOWER_IS_BETTER = {'sam': True, 'euclidean': True, 'correlation': False}
 
 def identify_endmembers(E: np.ndarray, field_names: list[str], *, library: str,
                         source_databases: list[str], dataset_ids: list[str],
-                        similarity_method: str, min_overlap_bands: int, top_n: int,
+                        similarity_method: str, min_overlap_bands: int,
+                        min_overlap_fraction: float, top_n: int,
                         include_spectra: bool = False) -> list[Optional[dict]]:
     """Identify each extracted endmember against the shared i.hyper.lib_*
     spectral library by calling i.hyper.speclookup directly (as a real
@@ -792,7 +802,8 @@ def identify_endmembers(E: np.ndarray, field_names: list[str], *, library: str,
     kwargs = dict(
         query_csv=tmp_csv, output=tmp_json, output_format='json',
         top_n=max(top_n, 2), similarity_method=similarity_method,
-        min_overlap_bands=min_overlap_bands, quiet=True, overwrite=True,
+        min_overlap_bands=min_overlap_bands, min_overlap_fraction=min_overlap_fraction,
+        quiet=True, overwrite=True,
     )
     if include_spectra:
         kwargs['flags'] = 's'
@@ -860,13 +871,30 @@ def _default_plot_dir() -> str:
     return os.path.join(genv['GISDBASE'], genv['LOCATION_NAME'])
 
 
+def _annotate_endpoint(ax, x, y, number, color):
+    """A small bold number at each curve's right end -- lets every
+    endmember/reference be identified at a glance without hunting through
+    a many-entry legend."""
+    ax.annotate(str(number), (x, y), color=color, fontsize=9, fontweight='bold',
+                xytext=(4, 0), textcoords='offset points', va='center')
+
+
 def plot_endmembers(wavelengths: np.ndarray, wavelength_unit: str, E: np.ndarray,
                     matches: list[Optional[dict]], input_map: str, extraction_method: str,
-                    plot_path: str, interactive: bool) -> None:
-    """Plot each extracted endmember's spectrum (solid line) alongside its
-    identified library match's own spectrum, if any (dashed line, same
-    color) -- a direct visual check of the identification, not just a
-    numeric score."""
+                    plot_path_endmembers: str, plot_path_reference: str, interactive: bool) -> None:
+    """Two separate, single-purpose plots rather than one crowded overlay:
+
+    1. Every extracted endmember's own spectrum together, numbered --
+       lets you compare the endmembers' shapes against each other.
+    2. Every identified library match's own spectrum together, numbered
+       to match (1), each labeled with its full identity (title, record
+       ID, source, similarity score) -- lets you compare the reference
+       materials against each other, and cross-reference which endmember
+       each belongs to via the shared number/color. Only written if -i
+       found at least one match; a numeric score alone, without seeing
+       the reference spectrum's own shape, is not enough to trust an
+       identification.
+    """
     import matplotlib
     if not interactive:
         matplotlib.use('Agg')
@@ -874,52 +902,75 @@ def plot_endmembers(wavelengths: np.ndarray, wavelength_unit: str, E: np.ndarray
 
     n = E.shape[0]
     wl_min, wl_max = float(np.min(wavelengths)), float(np.max(wavelengths))
-    fig, ax = plt.subplots(figsize=(11, 6))
     cmap = plt.get_cmap('tab10' if n <= 10 else 'tab20')
-    any_match = any(m is not None for m in matches)
+    colors = [cmap(i % cmap.N) for i in range(n)]
 
+    # --- Graph 1: extracted endmember spectra ---------------------------
+    fig1, ax1 = plt.subplots(figsize=(10, 6))
     for i in range(n):
-        color = cmap(i % cmap.N)
-        label = f"Endmember {i + 1}"
-        m = matches[i] if matches else None
-        if m:
-            label += f": {m['match_title']} ({m['match_record']}, {m['match_source']}) " \
-                     f"[{m['match_method']}={m['match_score']:.4g}]"
-        ax.plot(wavelengths, E[i], color=color, linewidth=1.6, label=label)
-        if m and m.get('match_wavelengths') and m.get('match_values'):
-            # A matched reference spectrum (e.g. a Nicolet FTIR record
-            # extending to 200,000+ nm) can natively cover a far wider
-            # range than the endmember itself -- clip to the endmember's
-            # own range (not just an xlim visual crop) so the reference's
-            # out-of-range values don't also distort the y-axis scale via
-            # autoscaling.
-            mwl = np.asarray(m['match_wavelengths'], dtype=float)
-            mval = np.asarray(m['match_values'], dtype=float)
-            in_range = (mwl >= wl_min) & (mwl <= wl_max)
-            if in_range.any():
-                ax.plot(mwl[in_range], mval[in_range], color=color,
-                       linewidth=1.0, linestyle='--', alpha=0.65)
-
-    ax.set_xlabel(f"Wavelength ({wavelength_unit})")
-    ax.set_ylabel("Reflectance")
-    ax.set_xlim(wl_min, wl_max)
-    ax.set_ylim(0.0, 1.0)  # physical reflectance range; any excursion in the
+        ax1.plot(wavelengths, E[i], color=colors[i], linewidth=1.6, label=str(i + 1))
+        _annotate_endpoint(ax1, wavelengths[-1], E[i][-1], i + 1, colors[i])
+    ax1.set_xlabel(f"Wavelength ({wavelength_unit})")
+    ax1.set_ylabel("Reflectance")
+    ax1.set_xlim(wl_min, wl_max)
+    ax1.set_ylim(0.0, 1.0)  # physical reflectance range; any excursion in the
     # underlying data (e.g. a water-vapor-band retrieval artifact) is a
     # known data-quality issue, not something the plot should rescale for
-    title = f"Extracted endmembers ({extraction_method}) — {input_map}"
-    if any_match:
-        title += "\n(solid: extracted endmember   dashed: matched library reference)"
-    ax.set_title(title)
-    ax.legend(fontsize=8, loc='best')
-    fig.tight_layout()
-
-    if plot_path:
-        os.makedirs(os.path.dirname(plot_path) or '.', exist_ok=True)
-        fig.savefig(plot_path, dpi=150)
-        gs.message(f"Wrote endmember spectra plot → {plot_path}")
+    ax1.set_title(f"Extracted endmembers ({extraction_method}) — {input_map}")
+    ax1.legend(title="Endmember", fontsize=8, ncol=2 if n > 6 else 1, loc='best')
+    fig1.tight_layout()
+    os.makedirs(os.path.dirname(plot_path_endmembers) or '.', exist_ok=True)
+    fig1.savefig(plot_path_endmembers, dpi=150)
+    gs.message(f"Wrote endmember spectra plot → {plot_path_endmembers}")
     if interactive:
         plt.show()
-    plt.close(fig)
+    plt.close(fig1)
+
+    # --- Graph 2: identified reference spectra, one per endmember -------
+    has_spectrum = [
+        m is not None and m.get('match_wavelengths') and m.get('match_values')
+        for m in matches
+    ]
+    if not any(has_spectrum):
+        gs.verbose("No identified library matches with spectra to plot "
+                  "(run with -i to identify endmembers first).")
+        return
+
+    fig2, ax2 = plt.subplots(figsize=(11, 6))
+    for i in range(n):
+        if not has_spectrum[i]:
+            continue
+        m = matches[i]
+        # A matched reference spectrum (e.g. a Nicolet FTIR record
+        # extending to 200,000+ nm) can natively cover a far wider range
+        # than the endmember itself -- clip to the endmember's own range
+        # (not just an xlim visual crop) so the reference's out-of-range
+        # values don't also distort the y-axis scale via autoscaling.
+        mwl = np.asarray(m['match_wavelengths'], dtype=float)
+        mval = np.asarray(m['match_values'], dtype=float)
+        in_range = (mwl >= wl_min) & (mwl <= wl_max)
+        if not in_range.any():
+            continue
+        mwl, mval = mwl[in_range], mval[in_range]
+        label = (f"{i + 1}: {m['match_title']} ({m['match_record']}, {m['match_source']}) "
+                 f"[{m['match_method']}={m['match_score']:.4g}, "
+                 f"{m['match_overlap_bands']} bands]")
+        ax2.plot(mwl, mval, color=colors[i], linewidth=1.4, label=label)
+        _annotate_endpoint(ax2, mwl[-1], mval[-1], i + 1, colors[i])
+
+    ax2.set_xlabel(f"Wavelength ({wavelength_unit})")
+    ax2.set_ylabel("Reflectance")
+    ax2.set_xlim(wl_min, wl_max)
+    ax2.set_ylim(0.0, 1.0)
+    ax2.set_title(f"Identified reference spectra by endmember number — {input_map}")
+    ax2.legend(title="Endmember: reference match", fontsize=7.5, loc='best')
+    fig2.tight_layout()
+    os.makedirs(os.path.dirname(plot_path_reference) or '.', exist_ok=True)
+    fig2.savefig(plot_path_reference, dpi=150)
+    gs.message(f"Wrote reference spectra plot → {plot_path_reference}")
+    if interactive:
+        plt.show()
+    plt.close(fig2)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -950,6 +1001,7 @@ def main(options, flags):
     spec_dataset_ids = [s for s in (options.get('spec_dataset_id', '') or '').split(',') if s]
     spec_similarity_method = options.get('spec_similarity_method', 'sam') or 'sam'
     spec_min_overlap_bands = int(options.get('spec_min_overlap_bands', '5') or '5')
+    spec_min_overlap_fraction = float(options.get('spec_min_overlap_fraction', '0.15') or '0.15')
     spec_top_n = int(options.get('spec_top_n', '3') or '3')
     make_plot = flags['p']
     plot_interactive = flags['w']
@@ -1070,7 +1122,8 @@ def main(options, flags):
         matches = identify_endmembers(
             E, field_names, library=spec_library, source_databases=spec_source_databases,
             dataset_ids=spec_dataset_ids, similarity_method=spec_similarity_method,
-            min_overlap_bands=spec_min_overlap_bands, top_n=spec_top_n,
+            min_overlap_bands=spec_min_overlap_bands,
+            min_overlap_fraction=spec_min_overlap_fraction, top_n=spec_top_n,
             include_spectra=make_plot,
         )
         n_identified = sum(1 for m in matches if m is not None)
@@ -1091,12 +1144,16 @@ def main(options, flags):
         plot_base = output_vector or input_map
         # Avoid a redundant "..._endmembers_endmembers.png" when the base
         # name (typically the user's own chosen output= vector name)
-        # already contains "endmember".
+        # already contains "endmember". Both filenames are always
+        # generated by the module itself -- there is no user-facing
+        # option to name them individually, only plot_dir to choose where
+        # they land.
         suffix = "" if "endmember" in plot_base.lower() else "_endmembers"
-        plot_name = f"{plot_base}{suffix}_spectra.png"
-        plot_path = os.path.join(plot_dir, plot_name)
+        plot_path_endmembers = os.path.join(plot_dir, f"{plot_base}{suffix}_spectra.png")
+        plot_path_reference = os.path.join(plot_dir, f"{plot_base}{suffix}_reference_spectra.png")
         plot_endmembers(wavelengths, wavelength_unit, E, matches, input_map,
-                        extraction_method, plot_path, plot_interactive)
+                        extraction_method, plot_path_endmembers, plot_path_reference,
+                        plot_interactive)
 
     # match_* text fields can contain the same '|' character v.in.ascii uses
     # as its field separator here -- sanitize defensively so a stray pipe in

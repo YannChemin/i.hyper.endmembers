@@ -19,7 +19,8 @@ library.
 [**wavelength_unit**=*string*]
 [**spec_library**=*string*] [**spec_source_database**=*string*[,*string*,...]]
 [**spec_dataset_id**=*string*[,*string*,...]] [**spec_similarity_method**=*string*]
-[**spec_min_overlap_bands**=*value*] [**spec_top_n**=*value*] [**plot_dir**=*string*]
+[**spec_min_overlap_bands**=*value*] [**spec_min_overlap_fraction**=*value*]
+[**spec_top_n**=*value*] [**plot_dir**=*string*]
 [**-n**] [**-b**] [**-l**] [**-i**] [**-p**] [**-w**]
 
 ## DESCRIPTION
@@ -127,6 +128,17 @@ FIPPI tell you *where* the spectrally distinct materials in a scene are;
   margin** to the runner-up be computed -- a small margin means the top
   match was only narrowly better than the next-best candidate (e.g. two
   visually similar minerals), a large margin means it was a clear winner.
+- **spec_min_overlap_bands=** (default 5, absolute) and
+  **spec_min_overlap_fraction=** (default 0.15, relative to the cube's
+  own band count): both must be satisfied for a candidate to be
+  considered at all. This matters more than it might look: some USGS
+  NIC4/Nicolet mineral records are only measured from ~2400nm onward, so
+  against a typical ~250-band VNIR/SWIR cube they only overlap in a
+  narrow sliver of a dozen or so bands at the very edge of the range --
+  technically above the old bands-only default of 5, but far too little
+  evidence to trust a mineral identification from. The 0.15 fraction
+  default rejects those outright rather than reporting a low-confidence
+  match as if it were a strong one.
 
 Each identified endmember is labeled with the best match's **source
 database**, **dataset**, **record ID**, **title**, **organization**, the
@@ -144,28 +156,42 @@ fabricated one.
 
 ### Plotting (-p / -w)
 
-**-p** renders every extracted endmember's spectrum as a matplotlib PNG
-(solid line, one color per endmember). The y-axis is always fixed to
-0.0-1.0, the physical range of a reflectance value -- any excursion
-outside it in the underlying data (e.g. a water-vapor-absorption-band
-retrieval artifact) is a known data-quality issue and is simply clipped
-from view rather than being allowed to rescale the whole plot. The x-axis
-is clipped to the endmember's own wavelength range, even when a matched
-library record natively covers a much wider range -- e.g. a Nicolet FTIR
-reference extending to 200,000+ nm would otherwise squeeze the whole
-comparison into an unreadable sliver. If **-i** was also given, each
-endmember's identified library match is overplotted in the same color as
-a dashed line, and the legend names the match's title, record ID, source,
-and similarity score alongside each endmember.
+**-p** renders **two** separate PNGs, deliberately not one crowded overlay:
 
-The PNG is written to **plot_dir** (default: the current GRASS location's
-own directory, `$GISDBASE/$LOCATION_NAME/` -- so it lands alongside
-whatever project the input raster belongs to without needing to specify
-one explicitly) as `<output>_endmembers.png`, or `<input>_endmembers.png`
-if no vector **output** was requested. Add **-w** to also open it in an
-interactive window (needs a display; the file is still written either
-way). **-p** alone (without **output**/**output_file**) is a valid,
-plot-only invocation.
+1. **Extracted endmember spectra**: every endmember's own spectrum
+   together, each a distinct color, numbered both in the legend and
+   directly at the end of its curve (so individual endmembers can be told
+   apart at a glance without hunting through the legend on a busy plot).
+2. **Identified reference spectra**: (only written if **-i** was also
+   given and at least one match was found) every identified library
+   match's own spectrum together, using the *same* color/number as its
+   endmember in graph 1 -- each legend entry gives the match's full
+   identity (title, record ID, source database), its similarity score,
+   and the number of overlapping bands the score was computed from. A
+   numeric score alone is not enough to trust an identification; seeing
+   the actual reference spectrum's shape (and how many bands really
+   overlapped) is what graph 2 is for.
+
+Both axes are fixed the same way in both plots: the y-axis to 0.0-1.0
+(the physical range of a reflectance value -- any excursion in the
+underlying data, e.g. a water-vapor-absorption-band retrieval artifact,
+is a known data-quality issue and is simply clipped from view rather than
+rescaling the whole plot), and the x-axis to the endmember's own
+wavelength range, even when a matched library record natively covers a
+much wider one -- e.g. a Nicolet FTIR reference extending to 200,000+ nm
+would otherwise squeeze the whole comparison into an unreadable sliver.
+
+Both PNGs are written to **plot_dir** (default: the current GRASS
+location's own directory, `$GISDBASE/$LOCATION_NAME/` -- so they land
+alongside whatever project the input raster belongs to without needing to
+specify one explicitly), named entirely by the module itself -- there is
+no option to set the filenames individually, only the directory:
+`<output>_spectra.png` and `<output>_reference_spectra.png` (or
+`<input>_endmembers_spectra.png`/`<input>_endmembers_reference_spectra.png`
+if no vector **output** was requested). Add **-w** to also open both in
+an interactive window (needs a display; the files are still written
+either way). **-p** alone (without **output**/**output_file**) is a
+valid, plot-only invocation.
 
 ## NOTES
 
@@ -384,26 +410,32 @@ Extracting 255 bands (350x706 pixels)…
 Extracting 6 endmembers using NFINDR…
 Identifying endmembers against the shared spectral library (i.hyper.speclookup)…
 Identified 6 of 6 endmember(s) (method=sam).
-Endmember 1: Minerals (splib07a_Wollastonite_HS348.3B_NIC4ccc_RREF, usgs_splib07) -- sam=1.01041, margin=0.1426 (13 overlapping bands)
-Endmember 2: Minerals (splib07a_Ilmenite_HS231.3B_NIC4bcu_RREF, usgs_splib07) -- sam=2.29892, margin=0.6172 (13 overlapping bands)
-...
+Endmember 1: Minerals (splib07a_Clinochlore_GDS159_NIC4bb_RREF, usgs_splib07) -- sam=3.70006, margin=0.1023 (99 overlapping bands)
+Endmember 2: Minerals (splib07a_Smaragdite_HS290.3B_Amphib_NIC4bcc_RREF, usgs_splib07) -- sam=4.4527, margin=0.3901 (100 overlapping bands)
+Endmember 3: Minerals (splib07a_Smaragdite_HS290.3B_Amphib_NIC4bcc_RREF, usgs_splib07) -- sam=3.25581, margin=0.0581 (100 overlapping bands)
+Endmember 4: Minerals (splib07a_Smaragdite_HS290.3B_Amphib_NIC4bcc_RREF, usgs_splib07) -- sam=4.73264, margin=0.1944 (100 overlapping bands)
+Endmember 5: Minerals (splib07a_Trona_GDS148_NIC4aau_RREF, usgs_splib07) -- sam=5.85535, margin=0.3133 (111 overlapping bands)
 Endmember 6: Vegetation (splib07a_Marsh_sediment_DWV3-0511_dry_ASDFRa_AREF, usgs_splib07) -- sam=7.57064, margin=0.341 (245 overlapping bands)
-Wrote endmember spectra plot → /home/yann/grassdata/emit_dubai/dubai_endmembers_endmembers.png
+Wrote endmember spectra plot → /home/yann/grassdata/emit_dubai/dubai_endmembers_spectra.png
+Wrote reference spectra plot → /home/yann/grassdata/emit_dubai/dubai_endmembers_reference_spectra.png
 Writing endmember vector map → dubai_endmembers…
 Done: 6 endmember(s) extracted with NFINDR.
 ```
 
-No **output_file**/**plot_dir** given here, so the PNG lands in the
+No **output_file**/**plot_dir** given here, so both PNGs land in the
 project's own directory automatically
-(`$GISDBASE/$LOCATION_NAME/` = `~/grassdata/emit_dubai/`), named after the
-vector output. The plot's x-axis is clipped to the endmember's own
-~381-2493nm range even though endmembers 1-4's matched NIC4 reference
-spectra natively extend past 200,000nm -- without that clipping the whole
-comparison would be squeezed into an unreadable sliver near the y-axis.
-Endmembers 1-4 all matched narrow-range (13 overlapping bands) NIC4
-records, a low-confidence match worth treating cautiously compared to
-endmember 6's 245-band overlap; **spec_min_overlap_bands** can be raised
-to require broader agreement before accepting a match.
+(`$GISDBASE/$LOCATION_NAME/` = `~/grassdata/emit_dubai/`), named entirely
+by the module from the vector output name. `dubai_endmembers_spectra.png`
+shows the six extracted endmembers together, numbered;
+`dubai_endmembers_reference_spectra.png` shows their six identified USGS
+matches together, same numbers/colors, each labeled with its full
+identity and score. With the default **spec_min_overlap_fraction=0.15**,
+every match now covers at least 99 of the cube's 255 bands (~39%); an
+earlier run without that relative floor had matched several endmembers
+to NIC4 records overlapping in only 13 edge-of-range bands -- technically
+passing the old bands-only default of 5, but too little evidence to
+trust, and visibly a near-empty sliver in the reference graph rather than
+a real comparable spectrum.
 
 ## SEE ALSO
 
