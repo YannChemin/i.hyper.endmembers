@@ -19,8 +19,8 @@ library.
 [**wavelength_unit**=*string*]
 [**spec_library**=*string*] [**spec_source_database**=*string*[,*string*,...]]
 [**spec_dataset_id**=*string*[,*string*,...]] [**spec_similarity_method**=*string*]
-[**spec_min_overlap_bands**=*value*] [**spec_top_n**=*value*]
-[**-n**] [**-b**] [**-l**] [**-i**]
+[**spec_min_overlap_bands**=*value*] [**spec_top_n**=*value*] [**plot_dir**=*string*]
+[**-n**] [**-b**] [**-l**] [**-i**] [**-p**] [**-w**]
 
 ## DESCRIPTION
 
@@ -141,6 +141,26 @@ formula, collection locality, and everything else the source harvester
 captured). An endmember with no library candidate above
 **spec_min_overlap_bands** gets a blank/null match rather than a
 fabricated one.
+
+### Plotting (-p / -w)
+
+**-p** renders every extracted endmember's spectrum as a matplotlib PNG
+(solid line, one color per endmember). If **-i** was also given, each
+endmember's identified library match is overplotted in the same color as
+a dashed line (clipped to the endmember's own wavelength range, even when
+the matched record natively covers a much wider range -- e.g. a Nicolet
+FTIR reference extending to 200,000+ nm would otherwise squeeze the whole
+comparison into an unreadable sliver), and the legend names the match's
+title, record ID, source, and similarity score alongside each endmember.
+
+The PNG is written to **plot_dir** (default: the current GRASS location's
+own directory, `$GISDBASE/$LOCATION_NAME/` -- so it lands alongside
+whatever project the input raster belongs to without needing to specify
+one explicitly) as `<output>_endmembers.png`, or `<input>_endmembers.png`
+if no vector **output** was requested. Add **-w** to also open it in an
+interactive window (needs a display; the file is still written either
+way). **-p** alone (without **output**/**output_file**) is a valid,
+plot-only invocation.
 
 ## NOTES
 
@@ -341,6 +361,44 @@ top match, e.g. for endmember 1:
  "plant_type": "Invasive herbaceous perennial weed", "plant": "Leafy spurge",
  "latin_name": "Euphorbia esula L.", "collection_locality": "Golden, Colorado", ...}
 ```
+
+### Example 5: identify and plot, on a real EMIT scene (emit_dubai)
+
+Using the `emit_dubai` project's own `AlMarwanProjectSite` saved region
+and its `emit_20260623` cube (255 bands):
+
+```sh
+g.region region=AlMarwanProjectSite
+i.hyper.endmembers input=emit_20260623 output=dubai_endmembers \
+    -i -p -b n_endmembers=6 extraction_method=NFINDR \
+    spec_source_database=usgs_splib07
+```
+
+```text
+Extracting 255 bands (350x706 pixels)…
+Extracting 6 endmembers using NFINDR…
+Identifying endmembers against the shared spectral library (i.hyper.speclookup)…
+Identified 6 of 6 endmember(s) (method=sam).
+Endmember 1: Minerals (splib07a_Wollastonite_HS348.3B_NIC4ccc_RREF, usgs_splib07) -- sam=1.01041, margin=0.1426 (13 overlapping bands)
+Endmember 2: Minerals (splib07a_Ilmenite_HS231.3B_NIC4bcu_RREF, usgs_splib07) -- sam=2.29892, margin=0.6172 (13 overlapping bands)
+...
+Endmember 6: Vegetation (splib07a_Marsh_sediment_DWV3-0511_dry_ASDFRa_AREF, usgs_splib07) -- sam=7.57064, margin=0.341 (245 overlapping bands)
+Wrote endmember spectra plot → /home/yann/grassdata/emit_dubai/dubai_endmembers_endmembers.png
+Writing endmember vector map → dubai_endmembers…
+Done: 6 endmember(s) extracted with NFINDR.
+```
+
+No **output_file**/**plot_dir** given here, so the PNG lands in the
+project's own directory automatically
+(`$GISDBASE/$LOCATION_NAME/` = `~/grassdata/emit_dubai/`), named after the
+vector output. The plot's x-axis is clipped to the endmember's own
+~381-2493nm range even though endmembers 1-4's matched NIC4 reference
+spectra natively extend past 200,000nm -- without that clipping the whole
+comparison would be squeezed into an unreadable sliver near the y-axis.
+Endmembers 1-4 all matched narrow-range (13 overlapping bands) NIC4
+records, a low-confidence match worth treating cautiously compared to
+endmember 6's 245-band overlap; **spec_min_overlap_bands** can be raised
+to require broader agreement before accepting a match.
 
 ## SEE ALSO
 

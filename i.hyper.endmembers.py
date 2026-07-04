@@ -197,6 +197,26 @@
 # %end
 
 # %flag
+# % key: p
+# % description: Plot the extracted endmember spectra (PNG; labeled with their identified library match if -i is also given -- solid line is the extracted endmember, dashed line its matched reference spectrum)
+# % guisection: Plot
+# %end
+
+# %flag
+# % key: w
+# % description: Also display the endmember spectra plot in an interactive window (requires -p and a display)
+# % guisection: Plot
+# %end
+
+# %option
+# % key: plot_dir
+# % type: string
+# % required: no
+# % description: Directory to save the endmember spectra plot PNG (default: the current GRASS location's own directory, e.g. $GISDBASE/$LOCATION_NAME/). Only used with -p
+# % guisection: Plot
+# %end
+
+# %flag
 # % key: n
 # % description: Disable ATGP-based initialization for NFINDR (no effect on other methods)
 # % guisection: Extraction
@@ -214,9 +234,6 @@
 # % guisection: Output
 # %end
 
-# %rules
-# % required: output,output_file
-# %end
 
 from __future__ import annotations
 
@@ -746,7 +763,8 @@ _LOWER_IS_BETTER = {'sam': True, 'euclidean': True, 'correlation': False}
 
 def identify_endmembers(E: np.ndarray, field_names: list[str], *, library: str,
                         source_databases: list[str], dataset_ids: list[str],
-                        similarity_method: str, min_overlap_bands: int, top_n: int) -> list[Optional[dict]]:
+                        similarity_method: str, min_overlap_bands: int, top_n: int,
+                        include_spectra: bool = False) -> list[Optional[dict]]:
     """Identify each extracted endmember against the shared i.hyper.lib_*
     spectral library by calling i.hyper.speclookup directly (as a real
     GRASS module invocation, not a reimplementation of its matching logic)
@@ -758,7 +776,10 @@ def identify_endmembers(E: np.ndarray, field_names: list[str], *, library: str,
     score, and a confidence margin to the runner-up (positive means the
     top match is clearly better than the second-best, in whichever
     direction similarity_method treats as "better"; None if top_n was too
-    low to have a runner-up, or none was found)."""
+    low to have a runner-up, or none was found). include_spectra also asks
+    i.hyper.speclookup (-s) for the matched record's own wavelengths/
+    values -- needed to overplot it against the extracted endmember, not
+    otherwise carried in the per-row CSV/JSON output."""
     n = E.shape[0]
     tmp_csv = gs.tempfile()
     tmp_json = gs.tempfile()
@@ -773,6 +794,8 @@ def identify_endmembers(E: np.ndarray, field_names: list[str], *, library: str,
         top_n=max(top_n, 2), similarity_method=similarity_method,
         min_overlap_bands=min_overlap_bands, quiet=True, overwrite=True,
     )
+    if include_spectra:
+        kwargs['flags'] = 's'
     if library:
         kwargs['library'] = library
     if source_databases:
@@ -822,8 +845,78 @@ def identify_endmembers(E: np.ndarray, field_names: list[str], *, library: str,
             'match_overlap_bands': top.get('n_overlap_bands'),
             'match_margin': margin,
             'match_extra_metadata': top.get('extra_metadata'),
+            'match_wavelengths': top.get('wavelengths'),
+            'match_values': top.get('values'),
         })
     return results
+
+
+def _default_plot_dir() -> str:
+    """The current GRASS location's own directory (e.g.
+    $GISDBASE/$LOCATION_NAME/) -- a sensible default regardless of which
+    project a user runs this in, since a plot documenting a scene's
+    endmembers belongs alongside that scene's own data."""
+    genv = gs.gisenv()
+    return os.path.join(genv['GISDBASE'], genv['LOCATION_NAME'])
+
+
+def plot_endmembers(wavelengths: np.ndarray, wavelength_unit: str, E: np.ndarray,
+                    matches: list[Optional[dict]], input_map: str, extraction_method: str,
+                    plot_path: str, interactive: bool) -> None:
+    """Plot each extracted endmember's spectrum (solid line) alongside its
+    identified library match's own spectrum, if any (dashed line, same
+    color) -- a direct visual check of the identification, not just a
+    numeric score."""
+    import matplotlib
+    if not interactive:
+        matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    n = E.shape[0]
+    wl_min, wl_max = float(np.min(wavelengths)), float(np.max(wavelengths))
+    fig, ax = plt.subplots(figsize=(11, 6))
+    cmap = plt.get_cmap('tab10' if n <= 10 else 'tab20')
+    any_match = any(m is not None for m in matches)
+
+    for i in range(n):
+        color = cmap(i % cmap.N)
+        label = f"Endmember {i + 1}"
+        m = matches[i] if matches else None
+        if m:
+            label += f": {m['match_title']} ({m['match_record']}, {m['match_source']}) " \
+                     f"[{m['match_method']}={m['match_score']:.4g}]"
+        ax.plot(wavelengths, E[i], color=color, linewidth=1.6, label=label)
+        if m and m.get('match_wavelengths') and m.get('match_values'):
+            # A matched reference spectrum (e.g. a Nicolet FTIR record
+            # extending to 200,000+ nm) can natively cover a far wider
+            # range than the endmember itself -- clip to the endmember's
+            # own range (not just an xlim visual crop) so the reference's
+            # out-of-range values don't also distort the y-axis scale via
+            # autoscaling.
+            mwl = np.asarray(m['match_wavelengths'], dtype=float)
+            mval = np.asarray(m['match_values'], dtype=float)
+            in_range = (mwl >= wl_min) & (mwl <= wl_max)
+            if in_range.any():
+                ax.plot(mwl[in_range], mval[in_range], color=color,
+                       linewidth=1.0, linestyle='--', alpha=0.65)
+
+    ax.set_xlabel(f"Wavelength ({wavelength_unit})")
+    ax.set_ylabel("Reflectance")
+    ax.set_xlim(wl_min, wl_max)
+    title = f"Extracted endmembers ({extraction_method}) — {input_map}"
+    if any_match:
+        title += "\n(solid: extracted endmember   dashed: matched library reference)"
+    ax.set_title(title)
+    ax.legend(fontsize=8, loc='best')
+    fig.tight_layout()
+
+    if plot_path:
+        os.makedirs(os.path.dirname(plot_path) or '.', exist_ok=True)
+        fig.savefig(plot_path, dpi=150)
+        gs.message(f"Wrote endmember spectra plot → {plot_path}")
+    if interactive:
+        plt.show()
+    plt.close(fig)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -855,6 +948,12 @@ def main(options, flags):
     spec_similarity_method = options.get('spec_similarity_method', 'sam') or 'sam'
     spec_min_overlap_bands = int(options.get('spec_min_overlap_bands', '5') or '5')
     spec_top_n = int(options.get('spec_top_n', '3') or '3')
+    make_plot = flags['p']
+    plot_interactive = flags['w']
+    plot_dir = options.get('plot_dir', '') or _default_plot_dir()
+
+    if not (output_vector or output_file or make_plot):
+        gs.fatal("At least one of output, output_file, or -p is required.")
 
     if n_endmembers < 2:
         gs.fatal("n_endmembers must be >= 2")
@@ -969,6 +1068,7 @@ def main(options, flags):
             E, field_names, library=spec_library, source_databases=spec_source_databases,
             dataset_ids=spec_dataset_ids, similarity_method=spec_similarity_method,
             min_overlap_bands=spec_min_overlap_bands, top_n=spec_top_n,
+            include_spectra=make_plot,
         )
         n_identified = sum(1 for m in matches if m is not None)
         gs.message(f"Identified {n_identified} of {n_endmembers} endmember(s) "
@@ -983,6 +1083,12 @@ def main(options, flags):
                 f"{m['match_source']}) -- {m['match_method']}={m['match_score']:.6g}"
                 f"{margin_txt} ({m['match_overlap_bands']} overlapping bands)"
             )
+
+    if make_plot:
+        plot_name = f"{output_vector or input_map}_endmembers.png"
+        plot_path = os.path.join(plot_dir, plot_name)
+        plot_endmembers(wavelengths, wavelength_unit, E, matches, input_map,
+                        extraction_method, plot_path, plot_interactive)
 
     # match_* text fields can contain the same '|' character v.in.ascii uses
     # as its field separator here -- sanitize defensively so a stray pipe in
