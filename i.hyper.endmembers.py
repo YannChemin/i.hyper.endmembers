@@ -185,8 +185,8 @@
 # % key: spec_min_overlap_fraction
 # % type: double
 # % required: no
-# % answer: 0.15
-# % description: Minimum overlapping bands required, as a fraction (0-1) of the cube's own band count -- both this and spec_min_overlap_bands must be satisfied. An absolute floor alone does not scale to a hyperspectral cube: e.g. 13 overlapping bands is a weak, edge-of-range match out of 255 EMIT bands. Only used with -i
+# % answer: 0.55
+# % description: Minimum overlapping bands required, as a fraction (0-1) of the cube's own band count -- both this and spec_min_overlap_bands must be satisfied. An absolute floor alone does not scale to a hyperspectral cube: e.g. 13 overlapping bands is a weak, edge-of-range match out of 255 EMIT bands. Default requires a majority (>50%) of the cube's bands to be covered before a match is trusted. Only used with -i
 # % guisection: Identification
 # %end
 
@@ -1001,7 +1001,7 @@ def main(options, flags):
     spec_dataset_ids = [s for s in (options.get('spec_dataset_id', '') or '').split(',') if s]
     spec_similarity_method = options.get('spec_similarity_method', 'sam') or 'sam'
     spec_min_overlap_bands = int(options.get('spec_min_overlap_bands', '5') or '5')
-    spec_min_overlap_fraction = float(options.get('spec_min_overlap_fraction', '0.15') or '0.15')
+    spec_min_overlap_fraction = float(options.get('spec_min_overlap_fraction', '0.55') or '0.55')
     spec_top_n = int(options.get('spec_top_n', '3') or '3')
     make_plot = flags['p']
     plot_interactive = flags['w']

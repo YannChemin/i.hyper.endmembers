@@ -129,16 +129,17 @@ FIPPI tell you *where* the spectrally distinct materials in a scene are;
   match was only narrowly better than the next-best candidate (e.g. two
   visually similar minerals), a large margin means it was a clear winner.
 - **spec_min_overlap_bands=** (default 5, absolute) and
-  **spec_min_overlap_fraction=** (default 0.15, relative to the cube's
+  **spec_min_overlap_fraction=** (default 0.55, relative to the cube's
   own band count): both must be satisfied for a candidate to be
   considered at all. This matters more than it might look: some USGS
   NIC4/Nicolet mineral records are only measured from ~2400nm onward, so
   against a typical ~250-band VNIR/SWIR cube they only overlap in a
   narrow sliver of a dozen or so bands at the very edge of the range --
   technically above the old bands-only default of 5, but far too little
-  evidence to trust a mineral identification from. The 0.15 fraction
-  default rejects those outright rather than reporting a low-confidence
-  match as if it were a strong one.
+  evidence to trust a mineral identification from. The 0.55 default
+  requires a clear majority (more than half) of the cube's bands to
+  actually overlap before a match is trusted, rather than reporting a
+  low-confidence match as if it were a strong one.
 
 Each identified endmember is labeled with the best match's **source
 database**, **dataset**, **record ID**, **title**, **organization**, the
@@ -410,11 +411,11 @@ Extracting 255 bands (350x706 pixels)…
 Extracting 6 endmembers using NFINDR…
 Identifying endmembers against the shared spectral library (i.hyper.speclookup)…
 Identified 6 of 6 endmember(s) (method=sam).
-Endmember 1: Minerals (splib07a_Clinochlore_GDS159_NIC4bb_RREF, usgs_splib07) -- sam=3.70006, margin=0.1023 (99 overlapping bands)
-Endmember 2: Minerals (splib07a_Smaragdite_HS290.3B_Amphib_NIC4bcc_RREF, usgs_splib07) -- sam=4.4527, margin=0.3901 (100 overlapping bands)
-Endmember 3: Minerals (splib07a_Smaragdite_HS290.3B_Amphib_NIC4bcc_RREF, usgs_splib07) -- sam=3.25581, margin=0.0581 (100 overlapping bands)
-Endmember 4: Minerals (splib07a_Smaragdite_HS290.3B_Amphib_NIC4bcc_RREF, usgs_splib07) -- sam=4.73264, margin=0.1944 (100 overlapping bands)
-Endmember 5: Minerals (splib07a_Trona_GDS148_NIC4aau_RREF, usgs_splib07) -- sam=5.85535, margin=0.3133 (111 overlapping bands)
+Endmember 1: Artificial Materials (splib07a_Rusted_Tin_Can_GDS378_MV99-6_ASDFRa_AREF, usgs_splib07) -- sam=10.0919, margin=0.1046 (255 overlapping bands)
+Endmember 2: Minerals (splib07a_Chromite_HS281.3B_ASDFRc_AREF, usgs_splib07) -- sam=55.7362, margin=0.2271 (255 overlapping bands)
+Endmember 3: Soils And Mixtures (splib07a_Montmorillonite+Illite_CM37_BECKb_AREF, usgs_splib07) -- sam=5.76009, margin=0.2315 (255 overlapping bands)
+Endmember 4: Minerals (splib07a_Diaspore_HS416.1B_ASDFRb_AREF, usgs_splib07) -- sam=17.2272, margin=0.1385 (255 overlapping bands)
+Endmember 5: Liquids (splib07a_Water+Montmor_SWy-2+16.5g-l_ASDFRa_AREF, usgs_splib07) -- sam=17.0424, margin=1.046 (255 overlapping bands)
 Endmember 6: Vegetation (splib07a_Marsh_sediment_DWV3-0511_dry_ASDFRa_AREF, usgs_splib07) -- sam=7.57064, margin=0.341 (245 overlapping bands)
 Wrote endmember spectra plot → /home/yann/grassdata/emit_dubai/dubai_endmembers_spectra.png
 Wrote reference spectra plot → /home/yann/grassdata/emit_dubai/dubai_endmembers_reference_spectra.png
@@ -429,13 +430,17 @@ by the module from the vector output name. `dubai_endmembers_spectra.png`
 shows the six extracted endmembers together, numbered;
 `dubai_endmembers_reference_spectra.png` shows their six identified USGS
 matches together, same numbers/colors, each labeled with its full
-identity and score. With the default **spec_min_overlap_fraction=0.15**,
-every match now covers at least 99 of the cube's 255 bands (~39%); an
-earlier run without that relative floor had matched several endmembers
-to NIC4 records overlapping in only 13 edge-of-range bands -- technically
-passing the old bands-only default of 5, but too little evidence to
-trust, and visibly a near-empty sliver in the reference graph rather than
-a real comparable spectrum.
+identity and score. With the default **spec_min_overlap_fraction=0.55**,
+every match now covers 245-255 of the cube's 255 bands (essentially the
+whole spectrum) -- visibly complete curves across nearly the full
+wavelength range in the reference graph, not the narrow slivers a looser
+threshold would allow through. Note that forcing full-spectrum agreement
+also surfaces genuinely poor matches honestly rather than hiding behind a
+convenient narrow overlap: endmember 2's best full-spectrum candidate is
+only a `sam=55.7` match -- a real signal that nothing in the searched
+sources looks like that endmember over its whole spectral shape, which a
+13-band sliver comparison could previously have masked with a
+deceptively low angle.
 
 ## SEE ALSO
 
