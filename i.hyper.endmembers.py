@@ -127,6 +127,15 @@
 # %end
 
 # %option
+# % key: max_invalid_fraction
+# % type: double
+# % required: no
+# % answer: 0.0
+# % description: Exclude a band from endmember extraction entirely if more than this fraction of valid pixels have an out-of-range (outside 0.0-1.0) reflectance value in it -- catches systematic sensor/atmospheric-correction artifacts (e.g. a strong water-vapor absorption band) that per-band valid=1 metadata may not flag, before they can distort ATGP/N-FINDR/PPI/FIPPI's norm- and volume-based pixel selection. Default 0 excludes a band on even a single out-of-range pixel: these algorithms specifically hunt for rare/extreme pixels, so even a low-frequency artifact is disproportionately likely to land on exactly the pixels selected as endmembers. Set to 1.0 to disable
+# % guisection: Bands
+# %end
+
+# %option
 # % key: wavelength_unit
 # % type: string
 # % required: no
@@ -1013,6 +1022,7 @@ def main(options, flags):
     random_seed = int(options['random_seed']) if options.get('random_seed') else None
     min_wl = float(options['min_wavelength']) if options.get('min_wavelength') else None
     max_wl = float(options['max_wavelength']) if options.get('max_wavelength') else None
+    max_invalid_fraction = float(options.get('max_invalid_fraction', '0.0') or '0.0')
     wavelength_unit = options.get('wavelength_unit', 'nm') or 'nm'
     atgp_init = not flags['n']
     only_valid = flags['b']
@@ -1107,6 +1117,41 @@ def main(options, flags):
 
     X = cube[:, valid_flat_idx].T  # (n_valid, Z)
     del cube
+
+    # --- Exclude systematically out-of-range bands before extraction ----
+    # ATGP/N-FINDR/PPI/FIPPI all select endmembers by per-pixel vector norm
+    # or simplex volume -- a band with out-of-range (outside 0.0-1.0)
+    # values in a large fraction of pixels (a known sensor/atmospheric-
+    # correction artifact, e.g. a strong water-vapor absorption band, not a
+    # real measurement) inflates those norms/volumes and can change which
+    # pixels look "most extreme" and get picked, independent of per-band
+    # valid=1 metadata (which may not flag it). Verified on a real EMIT
+    # scene: leaving such a band in changed 2 of 6 ATGP-selected pixels,
+    # including the very first (max-norm) pick.
+    if max_invalid_fraction < 1.0 and X.size:
+        invalid_frac = np.mean((X < 0.0) | (X > 1.0), axis=0)
+        bad_band_mask = invalid_frac > max_invalid_fraction
+        if bad_band_mask.any():
+            for bi in np.where(bad_band_mask)[0]:
+                gs.warning(
+                    f"Excluding band at {wavelengths[bi]:.1f}nm from endmember "
+                    f"extraction: {100 * invalid_frac[bi]:.1f}% of valid pixels "
+                    "have an out-of-range (outside 0.0-1.0) reflectance value "
+                    "(max_invalid_fraction="
+                    f"{max_invalid_fraction:.4g})."
+                )
+            keep_mask = ~bad_band_mask
+            X = X[:, keep_mask]
+            bands = [b for b, keep in zip(bands, keep_mask) if keep]
+            wavelengths = wavelengths[keep_mask]
+            Z = len(bands)
+            if not bands:
+                gs.fatal("All bands were excluded by max_invalid_fraction -- "
+                        "lower it, or inspect the cube for a pervasive artifact.")
+            if X.shape[1] < n_endmembers - 1 and extraction_method != 'PPI':
+                gs.fatal(f"Only {X.shape[1]} bands remain after excluding "
+                        f"out-of-range ones -- too few for {n_endmembers} "
+                        "endmembers with a non-PPI method.")
 
     # --- Endmember extraction --------------------------------------------
     if extraction_method in ('PPI', 'FIPPI'):

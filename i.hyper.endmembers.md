@@ -16,6 +16,7 @@ library.
 [**unmixing_method**=*string*] [**maxit**=*value*]
 [**ppi_skewers**=*value*] [**random_seed**=*value*]
 [**min_wavelength**=*value*] [**max_wavelength**=*value*]
+[**max_invalid_fraction**=*value*]
 [**wavelength_unit**=*string*]
 [**spec_library**=*string*] [**spec_source_database**=*string*[,*string*,...]]
 [**spec_dataset_id**=*string*[,*string*,...]] [**spec_similarity_method**=*string*]
@@ -99,6 +100,40 @@ in that metadata, and **min_wavelength**/**max_wavelength** to restrict to a
 spectral sub-range (e.g. to exclude noisy detector edges or strong water-
 vapor absorption windows), consistent with *i.hyper.geology*'s convention.
 
+### Automatic exclusion of out-of-range bands (max_invalid_fraction)
+
+`-b`/**min_wavelength**/**max_wavelength** rely on the cube's own
+metadata (or the caller) already knowing which bands are unreliable.
+That is not always true: a real EMIT scene's per-band `valid=1` metadata
+did not flag two bands at ~1357nm and ~1417nm (classic strong
+water-vapor-absorption wavelengths) even though 61.7% and 28.1% of valid
+pixels there held a physically impossible out-of-range (outside 0.0-1.0)
+reflectance value -- a sensor/atmospheric-correction artifact, not a
+measurement.
+
+This matters more for extraction than it might seem: ATGP starts from
+the pixel with the single largest spectral vector norm, and N-FINDR/PPI/
+FIPPI all likewise select or refine endmembers by norm or simplex volume.
+An out-of-range value in even one band inflates that pixel's norm and
+can change which pixel looks most "extreme" -- and because endmember
+algorithms specifically hunt for rare/extreme pixels, even a
+low-frequency artifact (one real case found here: just 0.14% of pixels
+in a third band) is disproportionately likely to land on exactly the
+pixels selected as endmembers, not average out harmlessly. Verified
+directly on this scene: excluding the two worst bands changed 2 of 6
+ATGP-selected pixels, including the very first (max-norm) pick.
+
+**max_invalid_fraction** (default 0.0) guards against this independent
+of `-b`/wavelength range/upstream metadata: after loading the cube, any
+band where more than this fraction of valid pixels has a value outside
+0.0-1.0 is excluded entirely -- from extraction, identification, and
+plotting -- with a warning naming the wavelength and the fraction
+affected. The default of 0 (exclude on even a single contaminated pixel)
+is deliberately strict, for the reason above; raise it (e.g. to 0.01) if
+your sensor is known to have harmless, genuinely sparse per-pixel noise
+unrelated to a systematic band-level artifact. Set to 1.0 to disable
+entirely.
+
 ### Identification against the shared spectral library (-i)
 
 **-i** identifies every extracted endmember against the shared local
@@ -110,6 +145,25 @@ ranks one result set per row), not a reimplementation of its matching
 logic. This is the natural second step after extraction: N-FINDR/ATGP/PPI/
 FIPPI tell you *where* the spectrally distinct materials in a scene are;
 **-i** gives each one a candidate real-world identity.
+
+Before being written to that query CSV, each endmember's own values are
+checked against the physical reflectance range: any value outside
+0.0-1.0 (e.g. a water-vapor-absorption-band retrieval artifact -- the
+same kind of spike the plot's fixed y-axis clips from view) is left blank
+in that row rather than passed through as-is or written as a literal
+`nan`. A blank CSV cell is skipped cleanly by *i.hyper.speclookup*'s own
+reader (`float('')` raises, same as any other unparseable value), simply
+dropping that one band from that endmember's query -- whereas writing
+the literal text `nan` would not be caught (Python's `float()` parses the
+strings `"nan"`/`"inf"` successfully instead of raising, the same pitfall
+already fixed in the harvesters' own ingestion), and passing the raw
+out-of-range value through uncorrected would silently distort the SAM/
+correlation/Euclidean computation for every candidate compared against
+that endmember. This is not a cosmetic fix: on a real EMIT scene, a
+handful of such artifact values changed which library record several
+endmembers matched best, in one case improving the best match from
+`sam=55.7` (a poor fit) to `sam=9.4` (a much better one) once the
+corrupting values were excluded from the comparison.
 
 - **spec_source_database=**, **spec_dataset_id=**: narrow the search (e.g.
   to `usgs_splib07`'s mineral chapters for a geology scene, or `relab`'s
@@ -408,15 +462,24 @@ i.hyper.endmembers input=emit_20260623 output=dubai_endmembers \
 
 ```text
 Extracting 255 bands (350x706 pixels)…
+WARNING: Excluding band at 1357.2nm from endmember extraction: 61.7% of
+         valid pixels have an out-of-range (outside 0.0-1.0) reflectance
+         value (max_invalid_fraction=0).
+WARNING: Excluding band at 1416.8nm from endmember extraction: 28.1% of
+         valid pixels have an out-of-range (outside 0.0-1.0) reflectance
+         value (max_invalid_fraction=0).
+WARNING: Excluding band at 1439.1nm from endmember extraction: 0.1% of
+         valid pixels have an out-of-range (outside 0.0-1.0) reflectance
+         value (max_invalid_fraction=0).
 Extracting 6 endmembers using NFINDR…
 Identifying endmembers against the shared spectral library (i.hyper.speclookup)…
 Identified 6 of 6 endmember(s) (method=sam).
-Endmember 1: Artificial Materials (splib07a_Rusted_Tin_Can_GDS378_MV99-6_ASDFRa_AREF, usgs_splib07) -- sam=10.0919, margin=0.1046 (255 overlapping bands)
-Endmember 2: Minerals (splib07a_Chromite_HS281.3B_ASDFRc_AREF, usgs_splib07) -- sam=55.7362, margin=0.2271 (255 overlapping bands)
-Endmember 3: Soils And Mixtures (splib07a_Montmorillonite+Illite_CM37_BECKb_AREF, usgs_splib07) -- sam=5.76009, margin=0.2315 (255 overlapping bands)
-Endmember 4: Minerals (splib07a_Diaspore_HS416.1B_ASDFRb_AREF, usgs_splib07) -- sam=17.2272, margin=0.1385 (255 overlapping bands)
-Endmember 5: Liquids (splib07a_Water+Montmor_SWy-2+16.5g-l_ASDFRa_AREF, usgs_splib07) -- sam=17.0424, margin=1.046 (255 overlapping bands)
-Endmember 6: Vegetation (splib07a_Marsh_sediment_DWV3-0511_dry_ASDFRa_AREF, usgs_splib07) -- sam=7.57064, margin=0.341 (245 overlapping bands)
+Endmember 1: Vegetation (splib07a_Rangeland_L02-045_S01%_G04%_ASDFRa_AREF, usgs_splib07) -- sam=4.0643, margin=0.06403 (247 overlapping bands)
+Endmember 2: Organic Compounds (splib07a_Xanthine_SA-X0626_90K_NIC4aa_RREF, usgs_splib07) -- sam=11.6209, margin=0.5861 (152 overlapping bands)
+Endmember 3: Liquids (splib07a_Water+Montmor_SWy-2+5.01g-l_ASDFRa_AREF, usgs_splib07) -- sam=12.8549, margin=3.96 (252 overlapping bands)
+Endmember 4: Vegetation (splib07a_Marsh_sediment_DWV3-0511_dry_ASDFRa_AREF, usgs_splib07) -- sam=5.36816, margin=0.4425 (242 overlapping bands)
+Endmember 5: Organic Compounds (splib07a_Peptidogylcan_SA-69554_ASDFRa_AREF, usgs_splib07) -- sam=5.96867, margin=0.3165 (252 overlapping bands)
+Endmember 6: Minerals (splib07a_Vesuvianite_HS446.1B_Idocras_ASDFRa_AREF, usgs_splib07) -- sam=2.86591, margin=0.01122 (252 overlapping bands)
 Wrote endmember spectra plot → /home/yann/grassdata/emit_dubai/dubai_endmembers_spectra.png
 Wrote reference spectra plot → /home/yann/grassdata/emit_dubai/dubai_endmembers_reference_spectra.png
 Writing endmember vector map → dubai_endmembers…
@@ -430,17 +493,19 @@ by the module from the vector output name. `dubai_endmembers_spectra.png`
 shows the six extracted endmembers together, numbered;
 `dubai_endmembers_reference_spectra.png` shows their six identified USGS
 matches together, same numbers/colors, each labeled with its full
-identity and score. With the default **spec_min_overlap_fraction=0.55**,
-every match now covers 245-255 of the cube's 255 bands (essentially the
-whole spectrum) -- visibly complete curves across nearly the full
-wavelength range in the reference graph, not the narrow slivers a looser
-threshold would allow through. Note that forcing full-spectrum agreement
-also surfaces genuinely poor matches honestly rather than hiding behind a
-convenient narrow overlap: endmember 2's best full-spectrum candidate is
-only a `sam=55.7` match -- a real signal that nothing in the searched
-sources looks like that endmember over its whole spectral shape, which a
-13-band sliver comparison could previously have masked with a
-deceptively low angle.
+identity and score.
+
+This run also demonstrates why **max_invalid_fraction**'s strict default
+(0) matters at the *extraction* stage, not just identification: with the
+two worst contaminated bands (and one marginal one, at just 0.14% of
+pixels) excluded before ATGP/N-FINDR ever run, different pixels get
+selected as endmembers than in an earlier run where those bands were left
+in -- confirmed directly by comparing the raw ATGP pixel indices with and
+without the bands excluded (2 of 6 changed, including the very first
+max-norm pick). The endmember spectra plot is also visibly cleaner: no
+more multiple-hundred-percent reflectance spike near 1350-1450nm, since
+the pixels now selected were never chosen partly *because of* that
+artifact in the first place.
 
 ## SEE ALSO
 
