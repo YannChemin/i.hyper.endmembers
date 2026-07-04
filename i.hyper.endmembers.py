@@ -903,6 +903,9 @@ def plot_endmembers(wavelengths: np.ndarray, wavelength_unit: str, E: np.ndarray
     ax.set_xlabel(f"Wavelength ({wavelength_unit})")
     ax.set_ylabel("Reflectance")
     ax.set_xlim(wl_min, wl_max)
+    ax.set_ylim(0.0, 1.0)  # physical reflectance range; any excursion in the
+    # underlying data (e.g. a water-vapor-band retrieval artifact) is a
+    # known data-quality issue, not something the plot should rescale for
     title = f"Extracted endmembers ({extraction_method}) — {input_map}"
     if any_match:
         title += "\n(solid: extracted endmember   dashed: matched library reference)"

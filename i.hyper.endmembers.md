@@ -145,13 +145,18 @@ fabricated one.
 ### Plotting (-p / -w)
 
 **-p** renders every extracted endmember's spectrum as a matplotlib PNG
-(solid line, one color per endmember). If **-i** was also given, each
+(solid line, one color per endmember). The y-axis is always fixed to
+0.0-1.0, the physical range of a reflectance value -- any excursion
+outside it in the underlying data (e.g. a water-vapor-absorption-band
+retrieval artifact) is a known data-quality issue and is simply clipped
+from view rather than being allowed to rescale the whole plot. The x-axis
+is clipped to the endmember's own wavelength range, even when a matched
+library record natively covers a much wider range -- e.g. a Nicolet FTIR
+reference extending to 200,000+ nm would otherwise squeeze the whole
+comparison into an unreadable sliver. If **-i** was also given, each
 endmember's identified library match is overplotted in the same color as
-a dashed line (clipped to the endmember's own wavelength range, even when
-the matched record natively covers a much wider range -- e.g. a Nicolet
-FTIR reference extending to 200,000+ nm would otherwise squeeze the whole
-comparison into an unreadable sliver), and the legend names the match's
-title, record ID, source, and similarity score alongside each endmember.
+a dashed line, and the legend names the match's title, record ID, source,
+and similarity score alongside each endmember.
 
 The PNG is written to **plot_dir** (default: the current GRASS location's
 own directory, `$GISDBASE/$LOCATION_NAME/` -- so it lands alongside
