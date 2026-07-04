@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>i.hyper.endmembers - GRASS GIS manual</title>
+<meta charset="utf-8">
+</head>
+<body>
+
+<h2>DESCRIPTION</h2>
+
+<p><em>i.hyper.endmembers</em> identifies the most spectrally "pure"/extreme
+pixels (endmembers) in a hyperspectral 3D raster cube &mdash; the classic
+first step of a linear spectral unmixing workflow &mdash; and reports their
+locations and spectra. Unlike <em>i.pysptools.unmix</em>, which works on a 2D
+imagery group, this module reads directly from a GRASS 3D raster (as
+produced by <a href="i.hyper.import.html">i.hyper.import</a>), and follows
+the same band-metadata and region-handling conventions as the rest of the
+<b>i.hyper</b> module family.</p>
+
+<p>Endmember extraction needs the whole scene loaded at once (unlike
+per-pixel classification, it searches for extremes across the full image),
+so processing is not chunked; keep the computational region to your actual
+area of interest.</p>
+
+<h3>Extraction methods</h3>
+
+<ul>
+  <li><b>ATGP</b> (Automatic Target Generation Process): starts from the
+    pixel with maximum spectral norm, then repeatedly picks the pixel with
+    the largest residual after projecting out the subspace spanned by the
+    endmembers already found. Fast and deterministic.</li>
+  <li><b>NFINDR</b> (default): reduces the cube to <i>p</i>-1 dimensions via
+    PCA (<i>p</i> = n_endmembers) and iteratively swaps candidate endmembers
+    to maximize the volume of the simplex they form &mdash; the classic
+    algorithm. Initialized from ATGP by default (<b>-n</b> to use a random
+    start instead).</li>
+  <li><b>FIPPI</b>: a Fast Iterative Pixel Purity Index, in the spirit of
+    Chang &amp; Plaza (2006) &mdash; alternates between projecting the cube
+    onto random and endmember-derived skewer directions and refining the
+    candidate set until it stops changing.</li>
+  <li><b>PPI</b> (Pixel Purity Index): projects every pixel onto many random
+    directions in band space and scores each pixel by how often it lands at
+    a projection extremum. The only method that can extract more endmembers
+    than there are bands.</li>
+</ul>
+
+<p>PPI and FIPPI runtime scales with <b>ppi_skewers</b> and the number of
+valid pixels. Lower <b>ppi_skewers</b> for a quicker, less statistically
+robust estimate. (This is dominated by dense matrix multiplication, so it
+also benefits substantially from an optimized BLAS &mdash; e.g. OpenBLAS
+rather than the plain reference BLAS some distributions ship by default.)</p>
+
+<h3>Outputs</h3>
+
+<ul>
+  <li><b>output</b>: a point vector map, one point per endmember, with one
+    attribute column per band named after its central wavelength (e.g.
+    <code>wl_2265_19</code>), holding that endmember's reflectance at that
+    band.</li>
+  <li><b>output_file</b>: the same spectra as CSV or JSON
+    (<b>output_format</b>). The first two fields are the endmember's native
+    projected X,Y by default, or longitude/latitude (WGS84) if <b>-l</b> is
+    given &mdash; reprojected via <code>m.proj</code>, so this works from any
+    source CRS, not just geographic locations.</li>
+  <li><b>abundance_prefix</b>: if given, also unmixes the <i>whole</i> scene
+    against the extracted endmembers (<b>unmixing_method</b>) and writes one
+    abundance raster per endmember (<code>&lt;prefix&gt;_1</code>,
+    <code>&lt;prefix&gt;_2</code>, ...).</li>
+</ul>
+
+<p>At least one of <b>output</b> / <b>output_file</b> is required.</p>
+
+<h3>Unmixing methods</h3>
+
+<ul>
+  <li><b>UCLS</b>: unconstrained least squares (fastest, no constraints).</li>
+  <li><b>NNLS</b>: non-negativity-constrained least squares.</li>
+  <li><b>FCLS</b> (default): fully constrained (non-negative <i>and</i> sums
+    to one), via the standard trick of augmenting the system with a
+    large-weight row enforcing the sum-to-one constraint and solving as NNLS
+    (Heinz &amp; Chang, 2001) &mdash; gives an exact-constraint result
+    without needing a general QP solver such as cvxopt.</li>
+</ul>
+
+<h3>Band metadata and compatibility</h3>
+
+<p>Band wavelength/FWHM/validity metadata is read the same way as
+<em>i.hyper.spectroscopy</em>: from <em>i.hyper.import</em>'s
+<code>grid3/&lt;map&gt;/hyper.json</code> sidecar if present, else
+<code>r3.info -h</code> history, else per-band <code>r.support</code>
+metadata. Use <b>-b</b> to restrict processing to bands marked valid
+(<code>valid=1</code>) in that metadata, and <b>min_wavelength</b>/
+<b>max_wavelength</b> to restrict to a spectral sub-range (e.g. to exclude
+noisy detector edges or strong water-vapor absorption windows), consistent
+with <em>i.hyper.geology</em>'s convention.</p>
+
+<h3>Identification against the shared spectral library (-i)</h3>
+
+<p><b>-i</b> identifies every extracted endmember against the shared local
+spectral library built by <em>i.hyper.lib_ecosis</em>/<em>i.hyper.lib_usgs</em>/
+<em>i.hyper.lib_relab</em>, by calling <em>i.hyper.speclookup</em> directly
+&mdash; one real GRASS module invocation covering all endmembers at once
+(each endmember becomes one query row in a temporary CSV, and
+<em>i.hyper.speclookup</em> already ranks one result set per row), not a
+reimplementation of its matching logic. This is the natural second step
+after extraction: N-FINDR/ATGP/PPI/FIPPI tell you <i>where</i> the
+spectrally distinct materials in a scene are; <b>-i</b> gives each one a
+candidate real-world identity.</p>
+
+<ul>
+  <li><b>spec_source_database=</b>, <b>spec_dataset_id=</b>: narrow the
+    search (e.g. to <code>usgs_splib07</code>'s mineral chapters for a
+    geology scene, or <code>relab</code>'s <code>Rock</code>/<code>Mineral</code>
+    categories) &mdash; the same filters <em>i.hyper.speclookup</em> itself
+    takes, and for the same reason: matching against the full
+    ~266,000-record library takes minutes, matching against one relevant
+    source/category takes seconds.</li>
+  <li><b>spec_similarity_method=</b> (default <code>sam</code>, matching
+    <em>i.hyper.speclookup</em>'s own default): Spectral Angle Mapper is
+    usually the right choice here specifically because it is insensitive
+    to a uniform brightness/albedo offset between a real scene endmember
+    (subject to atmospheric and BRDF effects) and a clean lab/field
+    reference spectrum.</li>
+  <li><b>spec_top_n=</b> (default 3): only the single best match is
+    attached to the output, but requesting more than one candidate lets a
+    <b>confidence margin</b> to the runner-up be computed &mdash; a small
+    margin means the top match was only narrowly better than the
+    next-best candidate (e.g. two visually similar minerals), a large
+    margin means it was a clear winner.</li>
+</ul>
+
+<p>Each identified endmember is labeled with the best match's <b>source
+database</b>, <b>dataset</b>, <b>record ID</b>, <b>title</b>,
+<b>organization</b>, the <b>similarity score</b> (accuracy) and
+<b>number of overlapping bands</b> used to compute it, and the
+<b>confidence margin</b> to the runner-up (precision) &mdash; attached to
+the vector map's attribute table (<code>match_source</code>,
+<code>match_dataset</code>, <code>match_record</code>,
+<code>match_title</code>, <code>match_organization</code>,
+<code>match_score</code>, <code>match_overlap_bands</code>,
+<code>match_margin</code>) and, more fully, to <b>output_file</b> (the
+same fields plus <code>match_method</code> and the matched record's
+complete <code>match_extra_metadata</code> JSON &mdash; mineral/plant
+name, formula, collection locality, and everything else the source
+harvester captured). An endmember with no library candidate above
+<b>spec_min_overlap_bands</b> gets a blank/null match rather than a
+fabricated one.</p>
+
+<h2>NOTES</h2>
+
+<p>Column/field names are derived from each band's central wavelength, in
+<b>wavelength_unit</b> (nm by default), sanitized into valid SQL identifiers
+(e.g. <code>2265.19</code> nm becomes <code>wl_2265_19</code>).</p>
+
+<p>Endmember coordinates are cell centers of whichever pixel was selected,
+computed directly from the active computational region &mdash; they are
+exact regardless of the region's resolution or extent relative to the
+raster's native footprint.</p>
+
+<h2>EXAMPLES</h2>
+
+<p>The examples below use an EMIT scene imported with <em>i.hyper.import</em>
+into its own location, <code>emit_slovakia</code> (raster_3d map
+<code>emit_20240730</code>, 244 bands, <code>hyper.json</code> sidecar
+metadata). Its native footprint covers nearly all of Slovakia (1727 x 2746
+pixels, north=49.10 south=48.17 east=20.53 west=19.04) &mdash; endmember
+extraction needs the whole active region loaded into memory at once (see
+above), so the <i>first</i> step in any real session is always to restrict
+the region to the actual area of interest, not run against the full native
+extent:</p>
+
+<div class="code"><pre>
+g.region n=48.70 s=48.60 e=19.80 w=19.70 res=0:00:01.952037
+g.region -g
+</pre></div>
+
+<div class="code"><pre>
+projection=3
+zone=0
+n=48.7
+s=48.6
+w=19.7
+e=19.8
+nsres=0.000543478260869573
+ewres=0.000543478260869573
+rows=184
+cols=184
+cells=33856
+</pre></div>
+
+<h3>Example 1: N-FINDR (default), vector map + CSV with longitude/latitude</h3>
+
+<div class="code"><pre>
+i.hyper.endmembers input=emit_20240730 output=slovakia_endmembers \
+    output_file=slovakia_endmembers.csv -l n_endmembers=6 \
+    extraction_method=NFINDR
+</pre></div>
+
+<div class="code"><pre>
+Extracting 244 bands (184x184 pixels)&hellip;
+Extracting 6 endmembers using NFINDR&hellip;
+Writing endmember vector map &rarr; slovakia_endmembers&hellip;
+Writing endmember spectra (csv) &rarr; slovakia_endmembers.csv&hellip;
+Done: 6 endmember(s) extracted with NFINDR.
+</pre></div>
+
+<p>The vector map has one point per endmember and one attribute column per
+band, named by its central wavelength:</p>
+
+<div class="code"><pre>
+v.info -c map=slovakia_endmembers
+</pre></div>
+
+<div class="code"><pre>
+INTEGER|cat
+DOUBLE PRECISION|x
+DOUBLE PRECISION|y
+DOUBLE PRECISION|wl_381_0056
+DOUBLE PRECISION|wl_388_4092
+DOUBLE PRECISION|wl_395_8158
+...
+</pre></div>
+
+<p>And the CSV (<b>-l</b> puts longitude/latitude first, reprojected via
+<code>m.proj</code> from this location's native CRS &mdash; here already
+geographic, so the values are unchanged, but the same flag reprojects
+correctly from a projected/UTM location too):</p>
+
+<div class="code"><pre>
+lon,lat,wl_381_0056,wl_388_4092,wl_395_8158,wl_403_2254,...
+19.70027174,48.62038043,0.00179211446,0.00183079974,0.00186951912,0.00190832582,...
+</pre></div>
+
+<h3>Example 2: PPI + FCLS abundance mapping over the whole region</h3>
+
+<div class="code"><pre>
+i.hyper.endmembers input=emit_20240730 output=slovakia_ppi \
+    n_endmembers=5 extraction_method=PPI \
+    abundance_prefix=slovakia_abund unmixing_method=FCLS random_seed=42
+</pre></div>
+
+<div class="code"><pre>
+Extracting 244 bands (184x184 pixels)&hellip;
+Extracting 5 endmembers using PPI&hellip;
+Writing endmember vector map &rarr; slovakia_ppi&hellip;
+Unmixing abundances using FCLS&hellip;
+Done: 5 endmember(s) extracted with PPI.
+</pre></div>
+
+<p>This writes <code>slovakia_abund_1</code> .. <code>slovakia_abund_5</code>,
+one abundance raster per endmember, each valued 0-1 and summing to 1 across
+the five rasters at every pixel (FCLS's non-negativity + sum-to-one
+constraints):</p>
+
+<div class="code"><pre>
+r.univar map=slovakia_abund_1 -g
+</pre></div>
+
+<div class="code"><pre>
+n=33856
+min=0
+max=1
+mean=0.0485496587901701
+</pre></div>
+
+<h3>Example 3: restrict to valid bands in a wavelength range, export JSON</h3>
+
+<div class="code"><pre>
+i.hyper.endmembers input=emit_20240730 output=slovakia_endmembers_b \
+    output_file=slovakia_endmembers.json output_format=json \
+    n_endmembers=8 extraction_method=ATGP \
+    -b min_wavelength=450 max_wavelength=2400
+</pre></div>
+
+<div class="code"><pre>
+Extracting 221 bands (184x184 pixels)&hellip;
+Extracting 8 endmembers using ATGP&hellip;
+Writing endmember vector map &rarr; slovakia_endmembers_b&hellip;
+Writing endmember spectra (json) &rarr; slovakia_endmembers.json&hellip;
+Done: 8 endmember(s) extracted with ATGP.
+</pre></div>
+
+<p>221 of the cube's 244 bands fall in the requested 450-2400nm range; no
+<b>-l</b> here, so the JSON's first two fields are the native projected X,Y
+(this location happens to be geographic, so numerically these look like
+lon/lat too, but for a projected/UTM location they would not be):</p>
+
+<div class="code"><pre>
+[
+  {
+    "x": 19.78233695652174,
+    "y": 48.674728260869564,
+    "wl_455_1703": 0.0431,
+    "wl_462_5989": 0.0448,
+    ...
+  },
+  ...
+]
+</pre></div>
+
+<h3>Example 4: identify each endmember against the shared spectral library</h3>
+
+<div class="code"><pre>
+i.hyper.endmembers input=emit_20240730 output=slovakia_endmembers_id \
+    output_file=slovakia_endmembers_id.csv -l -i n_endmembers=6 \
+    extraction_method=NFINDR spec_source_database=usgs_splib07 \
+    spec_dataset_id=ChapterV_Vegetation,ChapterM_Minerals,ChapterS_SoilsAndMixtures
+</pre></div>
+
+<div class="code"><pre>
+Extracting 244 bands (184x184 pixels)&hellip;
+Extracting 6 endmembers using NFINDR&hellip;
+Identifying endmembers against the shared spectral library (i.hyper.speclookup)&hellip;
+Identified 6 of 6 endmember(s) (method=sam).
+Endmember 1: Vegetation (splib07a_LeafySpurge_Spurge-A2-Jun98_ASDFRa_AREF, usgs_splib07) -- sam=5.18419, margin=0.02959 (240 overlapping bands)
+Endmember 2: Vegetation (splib07a_Marsh_SCAM50%..._CRMS121v32_ASDFRa_AREF, usgs_splib07) -- sam=3.71498, margin=0.2749 (234 overlapping bands)
+Endmember 3: Vegetation (splib07a_LeafySpurge_Spurge-A1-Oct97_ASDFRa_AREF, usgs_splib07) -- sam=3.4407, margin=0.03746 (240 overlapping bands)
+Endmember 4: Vegetation (splib07a_Marsh_SCAM50%..._CRMS121v32_ASDFRa_AREF, usgs_splib07) -- sam=1.37321, margin=0.1085 (234 overlapping bands)
+Endmember 5: Vegetation (splib07a_Oak_QUDU_CA01-QUDU-1_bush_1_ASDFRa_AREF, usgs_splib07) -- sam=1.7603, margin=0.1107 (236 overlapping bands)
+Endmember 6: Vegetation (splib07a_Grass-Smoothbrome_YNP-SB-1_AVIRISb_RTGC, usgs_splib07) -- sam=3.79253, margin=0.2401 (237 overlapping bands)
+Writing endmember vector map &rarr; slovakia_endmembers_id&hellip;
+Writing endmember spectra (csv) &rarr; slovakia_endmembers_id.csv&hellip;
+Done: 6 endmember(s) extracted with NFINDR.
+</pre></div>
+
+<p>Genuinely sensible for this Slovakia forest scene: every endmember
+matches best against USGS's Vegetation chapter, not Minerals or Soils,
+despite all three being searched. The vector map's attribute table
+carries the identity and confidence fields directly:</p>
+
+<div class="code"><pre>
+v.db.select map=slovakia_endmembers_id columns=cat,match_title,match_record,match_score,match_overlap_bands,match_margin
+</pre></div>
+
+<div class="code"><pre>
+cat|match_title|match_record|match_score|match_overlap_bands|match_margin
+1|Vegetation|splib07a_LeafySpurge_Spurge-A2-Jun98_ASDFRa_AREF|5.184195|240|0.029587
+2|Vegetation|splib07a_Marsh_SCAM50%..._CRMS121v32_ASDFRa_AREF|3.714981|234|0.274929
+...
+</pre></div>
+
+<p>and the CSV additionally carries the full <code>match_extra_metadata</code>
+for the top match, e.g. for endmember 1:</p>
+
+<div class="code"><pre>
+{"documentation_format": "PLANT", "sample_id": "Spurge-A2-Jun98",
+ "plant_type": "Invasive herbaceous perennial weed", "plant": "Leafy spurge",
+ "latin_name": "Euphorbia esula L.", "collection_locality": "Golden, Colorado", ...}
+</pre></div>
+
+<h2>SEE ALSO</h2>
+
+<em>
+<a href="i.hyper.speclookup.html">i.hyper.speclookup</a>,
+<a href="i.hyper.lib_ecosis.html">i.hyper.lib_ecosis</a>,
+<a href="i.hyper.lib_usgs.html">i.hyper.lib_usgs</a>,
+<a href="i.hyper.lib_relab.html">i.hyper.lib_relab</a>,
+<a href="i.hyper.spectroscopy.html">i.hyper.spectroscopy</a>,
+<a href="i.hyper.import.html">i.hyper.import</a>,
+<a href="i.hyper.geology.html">i.hyper.geology</a>,
+<a href="i.pysptools.unmix.html">i.pysptools.unmix</a>,
+<a href="r3.to.rast.html">r3.to.rast</a>,
+<a href="m.proj.html">m.proj</a>
+</em>
+
+<h2>AUTHOR</h2>
+
+Spectral Feature Extraction and Interpretation Engine
+
+</body>
+</html>
