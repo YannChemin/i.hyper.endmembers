@@ -1437,6 +1437,38 @@ def main(options, flags):
                         f"out-of-range ones -- too few for {n_endmembers} "
                         "endmembers with a non-PPI method.")
 
+    # --- Nulls: the extraction algorithms cannot take a NaN --------------
+    # A pixel that is null in only some bands passes the all-null nodata
+    # test above, and one NaN then propagates through every mean, covariance
+    # and pseudo-inverse ATGP/N-FINDR/FIPPI compute, where it surfaces as
+    # numpy's "SVD did not converge" from deep inside np.linalg rather than
+    # as anything a user can act on. Drop those pixels, and name the bands
+    # responsible: a band that is null over much of the scene costs far more
+    # pixels than it is worth and belongs outside the wavelength range.
+    if X.size:
+        finite_pixels = np.isfinite(X).all(axis=1)
+        n_dropped = int(finite_pixels.size - np.count_nonzero(finite_pixels))
+        if n_dropped:
+            nan_frac = np.mean(~np.isfinite(X), axis=0)
+            worst = [b for b in np.argsort(nan_frac)[::-1][:5] if nan_frac[b] > 0]
+            worst_txt = ", ".join(f"{wavelengths[b]:.1f}nm "
+                                  f"({100 * nan_frac[b]:.2f}%)" for b in worst)
+            gs.warning(
+                f"Dropping {n_dropped} of {finite_pixels.size} valid pixels "
+                "that are null in at least one band: the extraction "
+                "algorithms cannot take a null. Bands with the most nulls: "
+                f"{worst_txt}."
+            )
+            X = X[finite_pixels]
+            valid_flat_idx = valid_flat_idx[finite_pixels]
+        if X.shape[0] < n_endmembers:
+            gs.fatal(
+                f"Only {X.shape[0]} pixels have a value in every band, fewer "
+                f"than the {n_endmembers} endmembers requested. Exclude the "
+                "null-heavy bands with min_wavelength/max_wavelength or -b, "
+                "or widen the region."
+            )
+
     # --- Endmember extraction --------------------------------------------
     if extraction_method in ('PPI', 'FIPPI'):
         gs.verbose(
