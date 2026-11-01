@@ -116,7 +116,7 @@
 # % required: no
 # % answer: 0
 # % label: Extract endmembers from this many randomly sampled pixels instead of the whole region (0 = whole region)
-# % description: The whole-region path materialises one 2D raster per band with r3.to.rast, which pays for the full scene once per band; a sample reads only the voxels it asks for, with r3.what. Measured on a 8471x7284x408 drone mosaic, 50000 sampled spectra cost 367 s against about 5400 s of band slicing, and the per-point cost is set by the cube tile geometry, so a sample spread over a large region costs far more per spectrum than one inside a small one (7.80 vs 0.57 ms per point). Endmember extraction looks for the few most extreme spectra, so a sample that misses a rare material cannot find it -- raise this, rather than lower it, when a material is expected but not found. Cannot be combined with abundance_prefix=
+# % description: The whole-region path materialises one 2D raster per band with r3.to.rast, which pays for the full scene once per band; a sample reads only the voxels it asks for, with r3.what. Measured on a 8471x7284x408 drone mosaic, 50000 sampled spectra at the native grid cost 367 s against 1 h 24 min to load the same cube at a tenth of that resolution, and the per-point cost is set by the cube tile geometry, so a sample spread over a large region costs far more per spectrum than one inside a small one (7.80 vs 0.57 ms per point). Endmember extraction looks for the few most extreme spectra, so a sample that misses a rare material cannot find it -- raise this, rather than lower it, when a material is expected but not found. Cannot be combined with abundance_prefix=
 # % guisection: Extraction
 # %end
 
@@ -403,12 +403,12 @@ def sample_cube(raster3d: str, bands: list[dict], n_sample: int, rng,
 
     The whole-region loader above materialises a 2D raster per band, so it
     reads the entire scene once per band: on the C2RD Pourrieres mosaic
-    (8471x7284x408) that is about 10-15 s per band, an hour and a half for
-    the cube. r3.what reads only the voxels asked for, so a sample of a few
-    tens of thousands of whole spectra comes back in seconds. Endmember
-    extraction only ever uses a handful of extreme spectra out of the
-    region, so sampling costs coverage of rare materials, not accuracy on
-    the ones it does see.
+    (8471x7284x408) that measured 10-15 s per band and 1 h 24 min for the
+    cube, at a 0.3 m region decimated tenfold from the native grid. r3.what
+    reads only the voxels asked for, and 50000 whole spectra at the native
+    grid measured 367 s. Endmember extraction only ever uses a handful of
+    extreme spectra out of the region, so sampling costs coverage of rare
+    materials, not accuracy on the ones it does see.
 
     Returns (X, flat_idx): X is (n_kept, len(bands)) float32 in the cube's
     own stored units, and flat_idx the row-major cell index of each kept

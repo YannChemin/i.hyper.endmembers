@@ -158,19 +158,21 @@ same scale in both modules. Give it explicitly to override a wrong detection.
 
 By default the module loads every pixel of the computational region. It does
 that with *r3.to.rast*, one 2D raster per band, which reads the whole scene
-once per band: on the C2RD Pourrieres drone mosaic (8471x7284x408) a single
-band slice takes 10-15 s, so the 408-band cube costs about an hour and a
-half before extraction even starts, and the loaded cube would need ~100 GB
-at native 0.03 m resolution.
+once per band. Measured on the C2RD Pourrieres drone mosaic (8471x7284x408):
+a single band slice takes 10-15 s, and loading the cube through all 408 of
+them took 1 h 24 min -- at a 0.3 m region, already decimated tenfold,
+because at the native 0.03 m grid the loaded cube would be 61.7 M pixels x
+408 bands, about 100 GB as float32.
 
 **sample_size**=*n* instead reads *n* randomly chosen whole spectra with
 *r3.what*, which fetches only the voxels asked for, with no per-band pass
 over the scene and memory of only *n* x bands x 4 bytes. On the same cube,
-50000 sampled spectra at native 0.03 m took 367 s against about 5400 s of
-band slicing, and the whole run -- sampling, N-FINDR for 20 endmembers and
-20 identification queries -- took 6 min 12 s. The sampled cells are drawn
-without replacement from the region's own cell grid and depend on
-**random_seed**, so a run is reproducible; coordinates and spectra of the
+50000 sampled spectra at native 0.03 m took 367 s, against the 1 h 24 min
+that loading the same cube took at a tenth of that resolution, and the whole
+run -- sampling, N-FINDR for 20 endmembers and 20 identification queries --
+took 6 min 12 s. The sampled cells are drawn without replacement from the
+region's own cell grid and depend on **random_seed**, so a run is
+reproducible; coordinates and spectra of the
 selected endmembers are identical to what the whole-region path reports for
 the same pixel.
 
@@ -631,8 +633,9 @@ artifact in the first place.
 ### Example 6: sample a large drone cube instead of loading it
 
 The C2RD Pourrieres mosaic is 8471x7284x408 at 0.03 m; the whole-region path
-would take about an hour and a half of band extraction and ~100 GB of
-memory. Sampling 50000 whole spectra reads the same cube in seconds:
+measured 1 h 24 min of band extraction even at a decimated 0.3 m region, and
+would need about 100 GB of memory at the native one. Sampling 50000 whole
+spectra reads the same cube at full resolution in 367 s:
 
 ```sh
 g.region raster_3d=mosaic_final
