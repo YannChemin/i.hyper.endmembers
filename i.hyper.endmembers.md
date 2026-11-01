@@ -15,6 +15,7 @@ library.
 **n_endmembers**=*value* [**extraction_method**=*string*]
 [**unmixing_method**=*string*] [**maxit**=*value*]
 [**ppi_skewers**=*value*] [**random_seed**=*value*]
+[**sample_size**=*value*]
 [**min_wavelength**=*value*] [**max_wavelength**=*value*]
 [**max_invalid_fraction**=*value*] [**reflectance_scale**=*value*]
 [**wavelength_unit**=*string*]
@@ -39,7 +40,7 @@ conventions as the rest of the `i.hyper.*` family.
 Endmember extraction needs the whole scene loaded at once (unlike
 per-pixel classification, it searches for extremes across the full image),
 so processing is not chunked; keep the computational region to your actual
-area of interest.
+area of interest, or sample it with **sample_size** (below).
 
 ### Extraction methods
 
@@ -152,6 +153,36 @@ to reflectance. At 0 it is detected from the cube's own value range and
 reported, using the same detector and the same thresholds as
 *i.hyper.spectroscopy*'s option of the same name, so one cube resolves to the
 same scale in both modules. Give it explicitly to override a wrong detection.
+
+### Sampling instead of the whole region (sample_size)
+
+By default the module loads every pixel of the computational region. It does
+that with *r3.to.rast*, one 2D raster per band, which reads the whole scene
+once per band: on the C2RD Pourrieres drone mosaic (8471x7284x408) a single
+band slice takes 10-15 s, so the 408-band cube costs about an hour and a
+half before extraction even starts, and the loaded cube would need ~100 GB
+at native 0.03 m resolution.
+
+**sample_size**=*n* instead reads *n* randomly chosen whole spectra with
+*r3.what*, which fetches only the voxels asked for: a few tens of thousands
+of spectra come back in seconds, with no per-band pass over the scene and
+memory of only *n* x bands x 4 bytes. The sampled cells are drawn without
+replacement from the region's own cell grid and depend on
+**random_seed**, so a run is reproducible; coordinates and spectra of the
+selected endmembers are identical to what the whole-region path reports for
+the same pixel.
+
+What a sample costs is coverage, not accuracy. Endmember extraction hunts
+for the few most extreme spectra in the scene, so a material covering a
+thousandth of the region has about a 1 in 1000 chance per sampled pixel of
+being seen at all: if a known material is missing from the result, raise
+**sample_size** rather than lowering it. Sampling is refused together with
+**abundance_prefix**, since unmixing writes an abundance for every pixel of
+the region and so needs the whole cube.
+
+A sample whose size reaches the region's pixel count degenerates to querying
+every pixel one by one, which is slower than the whole-region path; the
+module warns and carries on.
 
 ### Identification against the shared spectral library (-i)
 
@@ -545,6 +576,38 @@ more multiple-hundred-percent reflectance spike near 1350-1450nm, since
 the pixels now selected were never chosen partly *because of* that
 artifact in the first place.
 
+### Example 6: sample a large drone cube instead of loading it
+
+The C2RD Pourrieres mosaic is 8471x7284x408 at 0.03 m; the whole-region path
+would take about an hour and a half of band extraction and ~100 GB of
+memory. Sampling 50000 whole spectra reads the same cube in seconds:
+
+```sh
+g.region raster_3d=mosaic_final
+i.hyper.endmembers input=mosaic_final output=c2rd_endmembers \
+    output_file=c2rd_endmembers.csv n_endmembers=20 \
+    extraction_method=NFINDR sample_size=50000 random_seed=42 \
+    max_invalid_fraction=0.005 reflectance_scale=10000 \
+    spec_server=http://127.0.0.1:8977 spec_top_n=5 -i -b
+```
+
+```text
+Sampling 50000 random pixels of 7284x8471 (408 bands)&hellip;
+Sampled 48610 valid of 50000 queried pixels (408 bands).
+Extracting 20 endmembers using NFINDR&hellip;
+Identified 20 of 20 endmember(s) (method=sam).
+```
+
+Spatial homogeneity from *i.variance.opencl* cross-checks the result: an
+endmember that sits in a locally heterogeneous neighbourhood is a mixed
+pixel or an edge, not a pure material.
+
+```sh
+i.variance.opencl input_3d=mosaic_final method=sam_mean size=5 \
+    output=mosaic_sam5
+r.what map=mosaic_sam5 points=c2rd_endmembers
+```
+
 ## SEE ALSO
 
 *[i.hyper.speclookup](i.hyper.speclookup.md),
@@ -552,7 +615,8 @@ artifact in the first place.
 [i.hyper.lib_relab](i.hyper.lib_relab.md),
 [i.hyper.spectroscopy](i.hyper.spectroscopy.md), [i.hyper.import](i.hyper.import.md),
 [i.hyper.geology](i.hyper.geology.md), [i.pysptools.unmix](i.pysptools.unmix.md),
-[r3.to.rast](r3.to.rast.md), [m.proj](m.proj.md)*
+[i.variance.opencl](i.variance.opencl.md),
+[r3.to.rast](r3.to.rast.md), [r3.what](r3.what.md), [m.proj](m.proj.md)*
 
 ## AUTHOR
 
