@@ -111,6 +111,16 @@
 # %end
 
 # %option
+# % key: sample_size
+# % type: integer
+# % required: no
+# % answer: 0
+# % label: Extract endmembers from this many randomly sampled pixels instead of the whole region (0 = whole region)
+# % description: The whole-region path materialises one 2D raster per band with r3.to.rast, which pays for the full scene once per band; a sample reads only the voxels it asks for, with r3.what, so a few tens of thousands of whole spectra come back in seconds rather than hours. Endmember extraction looks for the few most extreme spectra, so a sample that misses a rare material cannot find it -- raise this, rather than lower it, when a material is expected but not found. Cannot be combined with abundance_prefix=
+# % guisection: Extraction
+# %end
+
+# %option
 # % key: min_wavelength
 # % type: double
 # % required: no
@@ -136,6 +146,16 @@
 # %end
 
 # %option
+# % key: reflectance_scale
+# % type: double
+# % required: no
+# % answer: 0
+# % label: Divisor that converts stored values to 0-1 reflectance (0 = detect from the data)
+# % description: Surface-reflectance products are often stored scaled by 1000 or 10000. Endmember extraction itself is scale-free, but max_invalid_fraction's 0-1 range test and the identification query sent to i.hyper.speclookup are not. Detected from the cube's own value range when 0, and reported
+# % guisection: Bands
+# %end
+
+# %option
 # % key: wavelength_unit
 # % type: string
 # % required: no
@@ -150,6 +170,23 @@
 # % type: string
 # % required: no
 # % description: Shared spectral library root to identify endmembers against (default: i.hyper.speclookup's own default, $HOME/grassdata/hyperspeclib, as built by i.hyper.lib_ecosis/i.hyper.lib_usgs/i.hyper.lib_relab). Only used with -i
+# % guisection: Identification
+# %end
+
+# %option
+# % key: spec_server
+# % type: string
+# % required: no
+# % description: Base URL of a spectral index server to identify against instead of scanning spec_library= (e.g. http://127.0.0.1:8977), passed to i.hyper.speclookup server=. An exact search over a resident normalised library, so identification costs milliseconds per endmember whatever the library's size. Only used with -i
+# % guisection: Identification
+# %end
+
+# %option
+# % key: spec_category
+# % type: string
+# % required: no
+# % multiple: yes
+# % description: Restrict identification to specific material categories (e.g. mineral,soil,vegetation; default: all). Requires spec_server=, as only the served index carries a normalised category per record. Only used with -i
 # % guisection: Identification
 # %end
 
@@ -175,9 +212,9 @@
 # % key: spec_similarity_method
 # % type: string
 # % required: no
-# % options: sam,correlation,euclidean
+# % options: sam,correlation,euclidean,cosine,cr_sam,gd1
 # % answer: sam
-# % description: Spectral similarity metric used for identification (see i.hyper.speclookup). Only used with -i
+# % description: Spectral similarity metric used for identification (see i.hyper.speclookup). cosine, cr_sam and gd1 are computed by the index server only and need spec_server=. Only used with -i
 # % guisection: Identification
 # %end
 
@@ -270,12 +307,16 @@ import grass.script as gs
 # ---------------------------------------------------------------------------
 
 _TMP_RASTERS: list[str] = []
+_TMP_VECTORS: list[str] = []
 
 
 def _cleanup_tmp_rasters():
     if _TMP_RASTERS:
         gs.run_command('g.remove', type='raster',
                        name=','.join(_TMP_RASTERS), flags='f', quiet=True)
+    if _TMP_VECTORS:
+        gs.run_command('g.remove', type='vector',
+                       name=','.join(_TMP_VECTORS), flags='f', quiet=True)
 
 
 atexit.register(_cleanup_tmp_rasters)
@@ -290,6 +331,40 @@ atexit.register(_cleanup_tmp_rasters)
 # hand-rolled ctypes extraction was found to corrupt memory in exactly that
 # case while developing i.hyper.spectroscopy) and self-reconciles any 2D/3D
 # region mismatch.
+
+
+def _detect_reflectance_scale(raster3d: str) -> float:
+    """Divisor that brings the cube's stored values into 0-1 reflectance.
+
+    Endmember extraction is scale-free -- ATGP/N-FINDR/PPI/FIPPI all pick
+    pixels by vector norm or simplex volume, and a common factor cancels out
+    of the ranking -- but two things downstream are not. The
+    max_invalid_fraction test asks whether a band's values lie in 0.0-1.0,
+    and the identification query written for i.hyper.speclookup drops every
+    value outside that range. Surface-reflectance products commonly ship
+    scaled by 1000 or 10000 (the C2RD Pourrieres PARGE/ATCOR mosaic has a
+    true range of -975 to 14981), against which both tests reject the whole
+    cube. The scale is read from the cube's own range and reported, so a
+    wrong guess is visible rather than silent.
+
+    Kept deliberately identical to i.hyper.spectroscopy's detector of the
+    same name, so the same cube resolves to the same scale in both modules.
+    """
+    from grass.exceptions import CalledModuleError
+
+    try:
+        info = gs.raster3d_info(raster3d)
+        top = float(info["max"])
+    except (CalledModuleError, KeyError, TypeError, ValueError):
+        gs.warning("Could not read the cube's value range; assuming values "
+                  "are already 0-1 reflectance.")
+        return 1.0
+    if not np.isfinite(top):
+        return 1.0
+    for limit, scale in ((1.5, 1.0), (150.0, 100.0), (1500.0, 1000.0)):
+        if top <= limit:
+            return scale
+    return 10000.0
 
 
 def extract_band(raster3d: str, band_num: int) -> str:
@@ -313,6 +388,108 @@ def extract_band(raster3d: str, band_num: int) -> str:
 
     _TMP_RASTERS.append(tmp_name)
     return tmp_name
+
+def sample_cube(raster3d: str, bands: list[dict], n_sample: int, rng,
+                region: dict, nrows: int, ncols: int):
+    """Read whole spectra at n_sample random pixels with r3.what.
+
+    The whole-region loader above materialises a 2D raster per band, so it
+    reads the entire scene once per band: on the C2RD Pourrieres mosaic
+    (8471x7284x408) that is about 10-15 s per band, an hour and a half for
+    the cube. r3.what reads only the voxels asked for, so a sample of a few
+    tens of thousands of whole spectra comes back in seconds. Endmember
+    extraction only ever uses a handful of extreme spectra out of the
+    region, so sampling costs coverage of rare materials, not accuracy on
+    the ones it does see.
+
+    Returns (X, flat_idx): X is (n_kept, len(bands)) float32 in the cube's
+    own stored units, and flat_idx the row-major cell index of each kept
+    spectrum within the current 2D region, so that the caller's coordinate
+    arithmetic is the same as for the whole-region path.
+    """
+    n_pixels = nrows * ncols
+    if n_sample >= n_pixels:
+        gs.warning(
+            f"sample_size ({n_sample}) covers the whole region "
+            f"({n_pixels} pixels); querying every pixel with r3.what is "
+            "slower than the whole-region path -- drop sample_size to "
+            "sample, or use a smaller region."
+        )
+        cells = np.arange(n_pixels, dtype=np.int64)
+    else:
+        # Draw with replacement and deduplicate, then cut back to size: a
+        # few extra random numbers are cheaper than a permutation of the
+        # region, which would cost 8 bytes per pixel.
+        cells = np.empty(0, dtype=np.int64)
+        while cells.size < n_sample:
+            want = n_sample - cells.size
+            cells = np.unique(np.concatenate((
+                cells,
+                rng.integers(0, n_pixels, size=int(want * 1.1) + 16,
+                             dtype=np.int64))))
+        if cells.size > n_sample:
+            cells = rng.choice(cells, size=n_sample, replace=False)
+        cells.sort()  # Row-major order, so the query walks the tiles once.
+
+    west = float(region['w'])
+    north = float(region['n'])
+    ewres = float(region['ewres'])
+    nsres = float(region['nsres'])
+    xs = west + (cells % ncols + 0.5) * ewres
+    ys = north - (cells // ncols + 0.5) * nsres
+
+    tmp_vector = f"tmp_endmembers_sample_{os.getpid()}"
+    ascii_tmp = gs.tempfile()
+    with open(ascii_tmp, 'w') as f:
+        f.writelines(f"{x:.10f}|{y:.10f}\n"
+                     for x, y in zip(xs.tolist(), ys.tolist()))
+    gs.run_command('v.in.ascii', input=ascii_tmp, output=tmp_vector,
+                   format='point', separator='pipe', x=1, y=2, cat=0,
+                   overwrite=True, quiet=True)
+    _TMP_VECTORS.append(tmp_vector)
+    os.unlink(ascii_tmp)
+
+    out_tmp = gs.tempfile()
+    # null_value=nan so that the text parses straight into float32 below.
+    gs.run_command('r3.what', input=raster3d, points=tmp_vector,
+                   output=out_tmp, separator='pipe', null_value='nan',
+                   overwrite=True, quiet=True)
+
+    n_depths = int(gs.parse_command('g.region', flags='3g')['depths'])
+    depth_cols = [b['band'] - 1 for b in bands]
+    if depth_cols and max(depth_cols) >= n_depths:
+        gs.fatal(f"Band metadata names band {max(depth_cols) + 1}, but the "
+                f"3D region has only {n_depths} depths.")
+
+    X = np.empty((cells.size, len(bands)), dtype=np.float32)
+    kept = np.empty(cells.size, dtype=np.int64)
+    n_kept = 0
+    # gs.percent() emits a message per call, unlike C's G_percent(), which
+    # keeps the last value it printed -- so only call it once per percent.
+    tick = max(1, cells.size // 100)
+    with open(out_tmp) as f:
+        for i, line in enumerate(f):
+            if i % tick == 0:
+                gs.percent(i, cells.size, 1)
+            parts = line.rstrip('\n').split('|')
+            if len(parts) != n_depths + 2:
+                gs.fatal(f"r3.what returned {len(parts) - 2} values for "
+                        f"sample point {i + 1}, expected {n_depths}.")
+            vals = np.array([parts[2 + j] for j in depth_cols],
+                            dtype=np.float32)
+            if np.all(np.isnan(vals)):
+                continue  # Nodata pixel, as in the whole-region path.
+            col = min(ncols - 1, max(0, int((float(parts[0]) - west) // ewres)))
+            row = min(nrows - 1, max(0, int((north - float(parts[1])) // nsres)))
+            X[n_kept] = vals
+            kept[n_kept] = row * ncols + col
+            n_kept += 1
+    gs.percent(cells.size, cells.size, 1)
+    os.unlink(out_tmp)
+
+    gs.message(f"Sampled {n_kept} valid of {cells.size} queried pixels "
+              f"({len(bands)} bands).")
+    return X[:n_kept], kept[:n_kept]
 
 # ---------------------------------------------------------------------------
 # Band metadata (mirrors i.hyper.spectroscopy's get_band_info, for
@@ -776,11 +953,15 @@ def _reproject_to_lonlat(xy_pairs: list[tuple[float, float]]) -> list[tuple[floa
     return out
 
 
-_LOWER_IS_BETTER = {'sam': True, 'euclidean': True, 'correlation': False}
+# The index server reports every metric it offers as an angle in degrees,
+# so those are all lower-is-better (see i.hyper.speclookup's server mode).
+_LOWER_IS_BETTER = {'sam': True, 'euclidean': True, 'correlation': False,
+                    'cosine': True, 'cr_sam': True, 'gd1': True}
 
 
 def identify_endmembers(E: np.ndarray, field_names: list[str], *, library: str,
-                        source_databases: list[str], dataset_ids: list[str],
+                        server: str, source_databases: list[str],
+                        dataset_ids: list[str], categories: list[str],
                         similarity_method: str, min_overlap_bands: int,
                         min_overlap_fraction: float, top_n: int,
                         include_spectra: bool = False) -> list[Optional[dict]]:
@@ -838,12 +1019,22 @@ def identify_endmembers(E: np.ndarray, field_names: list[str], *, library: str,
     )
     if include_spectra:
         kwargs['flags'] = 's'
-    if library:
+    if server:
+        # server= and library= are alternatives, not a fallback pair: passing
+        # both would leave it ambiguous which one answered, so the server wins
+        # and says so rather than quietly scanning the tree as well.
+        kwargs['server'] = server
+        if library:
+            gs.warning("spec_library= is ignored while spec_server= is given; "
+                      "identification reads the served index.")
+    elif library:
         kwargs['library'] = library
     if source_databases:
         kwargs['source_database'] = source_databases
     if dataset_ids:
         kwargs['dataset_id'] = dataset_ids
+    if categories:
+        kwargs['category'] = categories
 
     gs.message("Identifying endmembers against the shared spectral library (i.hyper.speclookup)…")
     try:
@@ -1028,9 +1219,16 @@ def main(options, flags):
     only_valid = flags['b']
     use_lonlat = flags['l']
     identify = flags['i']
+    refl_scale = float(options.get('reflectance_scale', '0') or '0')
+    sample_size = int(options.get('sample_size', '0') or '0')
     spec_library = options.get('spec_library', '')
+    spec_server = options.get('spec_server', '')
     spec_source_databases = [s for s in (options.get('spec_source_database', '') or '').split(',') if s]
     spec_dataset_ids = [s for s in (options.get('spec_dataset_id', '') or '').split(',') if s]
+    spec_categories = [s for s in (options.get('spec_category', '') or '').split(',') if s]
+    if spec_categories and not spec_server:
+        gs.fatal("spec_category= needs spec_server=: only the served index "
+                "carries one normalised category per record.")
     spec_similarity_method = options.get('spec_similarity_method', 'sam') or 'sam'
     spec_min_overlap_bands = int(options.get('spec_min_overlap_bands', '5') or '5')
     spec_min_overlap_fraction = float(options.get('spec_min_overlap_fraction', '0.55') or '0.55')
@@ -1044,6 +1242,13 @@ def main(options, flags):
 
     if n_endmembers < 2:
         gs.fatal("n_endmembers must be >= 2")
+
+    if sample_size < 0:
+        gs.fatal("sample_size must be >= 0 (0 = use the whole region).")
+    if sample_size and abundance_prefix:
+        gs.fatal("sample_size= cannot be combined with abundance_prefix=: "
+                "unmixing writes an abundance for every pixel of the region, "
+                "which needs the whole cube rather than a sample.")
 
     rng = np.random.default_rng(random_seed)
 
@@ -1077,46 +1282,71 @@ def main(options, flags):
     ncols = int(region['cols'])
     n_pixels = nrows * ncols
 
-    mem_gb = Z * n_pixels * 4 / 1e9
-    if mem_gb > 2:
-        gs.warning(f"Loading the full cube needs ~{mem_gb:.1f} GB of memory "
-                  f"({Z} bands x {nrows}x{ncols} pixels). Endmember "
-                  "extraction needs the whole scene at once (unlike "
-                  "per-pixel classification), so this cannot be chunked -- "
-                  "consider restricting the region to a smaller area of "
-                  "interest first.")
+    if sample_size:
+        # --- Sample whole spectra with r3.what --------------------------
+        gs.message(f"Sampling {sample_size} random pixels of "
+                  f"{nrows}x{ncols} ({Z} bands)…")
+        X, valid_flat_idx = sample_cube(input_map, bands, sample_size, rng,
+                                        region, nrows, ncols)
+        if valid_flat_idx.size < n_endmembers:
+            gs.fatal("Fewer valid (non-nodata) sampled pixels than requested "
+                    "endmembers -- raise sample_size.")
+    else:
+        mem_gb = Z * n_pixels * 4 / 1e9
+        if mem_gb > 2:
+            gs.warning(f"Loading the full cube needs ~{mem_gb:.1f} GB of "
+                      f"memory ({Z} bands x {nrows}x{ncols} pixels). "
+                      "Endmember extraction needs the whole scene at once "
+                      "(unlike per-pixel classification), so this cannot be "
+                      "chunked -- consider restricting the region to a "
+                      "smaller area of interest, or sampling it with "
+                      "sample_size=.")
 
-    # --- Extract bands and load the full cube ---------------------------
-    gs.message(f"Extracting {Z} bands ({nrows}x{ncols} pixels)…")
-    tmp_names = []
-    for z_idx, b in enumerate(bands):
-        gs.percent(z_idx, Z, 2)
-        tmp_names.append(extract_band(input_map, b['band']))
-    gs.percent(Z, Z, 2)
-
-    from grass.pygrass.raster import RasterRow
-    cube = np.empty((Z, n_pixels), dtype=np.float32)
-    handles = [RasterRow(name) for name in tmp_names]
-    try:
-        for h in handles:
-            h.open()
-        for z_idx, h in enumerate(handles):
+        # --- Extract bands and load the full cube -----------------------
+        gs.message(f"Extracting {Z} bands ({nrows}x{ncols} pixels)…")
+        tmp_names = []
+        for z_idx, b in enumerate(bands):
             gs.percent(z_idx, Z, 2)
-            for r in range(nrows):
-                row_arr = np.array(h[r], dtype=np.float32)
-                cube[z_idx, r * ncols:(r + 1) * ncols] = row_arr
+            tmp_names.append(extract_band(input_map, b['band']))
         gs.percent(Z, Z, 2)
-    finally:
-        for h in handles:
-            h.close()
 
-    nodata_mask = np.all(np.isnan(cube), axis=0)
-    valid_flat_idx = np.where(~nodata_mask)[0]
-    if valid_flat_idx.size < n_endmembers:
-        gs.fatal("Fewer valid (non-nodata) pixels than requested endmembers.")
+        from grass.pygrass.raster import RasterRow
+        cube = np.empty((Z, n_pixels), dtype=np.float32)
+        handles = [RasterRow(name) for name in tmp_names]
+        try:
+            for h in handles:
+                h.open()
+            for z_idx, h in enumerate(handles):
+                gs.percent(z_idx, Z, 2)
+                for r in range(nrows):
+                    row_arr = np.array(h[r], dtype=np.float32)
+                    cube[z_idx, r * ncols:(r + 1) * ncols] = row_arr
+            gs.percent(Z, Z, 2)
+        finally:
+            for h in handles:
+                h.close()
 
-    X = cube[:, valid_flat_idx].T  # (n_valid, Z)
-    del cube
+        nodata_mask = np.all(np.isnan(cube), axis=0)
+        valid_flat_idx = np.where(~nodata_mask)[0]
+        if valid_flat_idx.size < n_endmembers:
+            gs.fatal("Fewer valid (non-nodata) pixels than requested "
+                    "endmembers.")
+
+        X = cube[:, valid_flat_idx].T  # (n_valid, Z)
+        del cube
+
+    # Everything below is expressed in 0-1 reflectance: the out-of-range band
+    # exclusion, the identification query, and the attributes written out. The
+    # cube may be stored scaled, so convert once here rather than carrying the
+    # scale through each of them.
+    if refl_scale <= 0:
+        refl_scale = _detect_reflectance_scale(input_map)
+        gs.message(f"Reflectance scale detected: {refl_scale:g} "
+                  f"(stored value / {refl_scale:g} = reflectance)")
+    else:
+        gs.verbose(f"Reflectance scale given: {refl_scale:g}")
+    if refl_scale != 1.0:
+        X /= np.float32(refl_scale)
 
     # --- Exclude systematically out-of-range bands before extraction ----
     # ATGP/N-FINDR/PPI/FIPPI all select endmembers by per-pixel vector norm
@@ -1187,8 +1417,10 @@ def main(options, flags):
     matches: list[Optional[dict]] = [None] * n_endmembers
     if identify:
         matches = identify_endmembers(
-            E, field_names, library=spec_library, source_databases=spec_source_databases,
-            dataset_ids=spec_dataset_ids, similarity_method=spec_similarity_method,
+            E, field_names, library=spec_library, server=spec_server,
+            source_databases=spec_source_databases,
+            dataset_ids=spec_dataset_ids, categories=spec_categories,
+            similarity_method=spec_similarity_method,
             min_overlap_bands=spec_min_overlap_bands,
             min_overlap_fraction=spec_min_overlap_fraction, top_n=spec_top_n,
             include_spectra=make_plot,

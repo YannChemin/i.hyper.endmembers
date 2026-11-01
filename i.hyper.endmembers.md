@@ -16,9 +16,11 @@ library.
 [**unmixing_method**=*string*] [**maxit**=*value*]
 [**ppi_skewers**=*value*] [**random_seed**=*value*]
 [**min_wavelength**=*value*] [**max_wavelength**=*value*]
-[**max_invalid_fraction**=*value*]
+[**max_invalid_fraction**=*value*] [**reflectance_scale**=*value*]
 [**wavelength_unit**=*string*]
-[**spec_library**=*string*] [**spec_source_database**=*string*[,*string*,...]]
+[**spec_library**=*string*] [**spec_server**=*string*]
+[**spec_source_database**=*string*[,*string*,...]]
+[**spec_category**=*string*[,*string*,...]]
 [**spec_dataset_id**=*string*[,*string*,...]] [**spec_similarity_method**=*string*]
 [**spec_min_overlap_bands**=*value*] [**spec_min_overlap_fraction**=*value*]
 [**spec_top_n**=*value*] [**plot_dir**=*string*]
@@ -134,6 +136,23 @@ your sensor is known to have harmless, genuinely sparse per-pixel noise
 unrelated to a systematic band-level artifact. Set to 1.0 to disable
 entirely.
 
+### Storage scale (reflectance_scale)
+
+Every 0.0-1.0 test in this module -- **max_invalid_fraction** above, and the
+identification query sent to *i.hyper.speclookup*, which drops any value
+outside that range -- assumes the cube holds reflectance as a fraction.
+Surface-reflectance products commonly ship scaled by 1000 or 10000 instead.
+Extraction itself does not care, since a common factor cancels out of every
+norm and simplex volume, but those two tests do: against a cube stored x10000
+*every band* looks entirely out of range and the module stops with "All bands
+were excluded by max_invalid_fraction".
+
+**reflectance_scale** (default 0) is the divisor that converts stored values
+to reflectance. At 0 it is detected from the cube's own value range and
+reported, using the same detector and the same thresholds as
+*i.hyper.spectroscopy*'s option of the same name, so one cube resolves to the
+same scale in both modules. Give it explicitly to override a wrong detection.
+
 ### Identification against the shared spectral library (-i)
 
 **-i** identifies every extracted endmember against the shared local
@@ -165,12 +184,31 @@ endmembers matched best, in one case improving the best match from
 `sam=55.7` (a poor fit) to `sam=9.4` (a much better one) once the
 corrupting values were excluded from the comparison.
 
+- **spec_server=**: identify against a spectral index server (e.g.
+  `http://127.0.0.1:8977`) instead of scanning a local **spec_library=**
+  tree, passed straight through to *i.hyper.speclookup* **server=**. The
+  server holds the whole library resident as one normalised matrix and
+  answers an exact search, so identification costs milliseconds per
+  endmember whatever the library's size -- which is what makes a
+  quarter-million-record library usable here at all. **spec_server=** and
+  **spec_library=** are alternatives: giving both warns and uses the
+  server, rather than leaving it ambiguous which one answered. Note that
+  the served index carries each record's identity but not its own
+  spectrum, so **-p** plots the extracted endmembers without the matched
+  reference overplotted.
 - **spec_source_database=**, **spec_dataset_id=**: narrow the search (e.g.
   to `usgs_splib07`'s mineral chapters for a geology scene, or `relab`'s
   `Rock`/`Mineral` categories) -- the same filters *i.hyper.speclookup*
   itself takes, and for the same reason: matching against the full
   ~266,000-record library takes minutes, matching against one relevant
-  source/category takes seconds.
+  source/category takes seconds. With **spec_server=** the filters cost
+  nothing either way, so they serve to express what the scene can
+  plausibly contain rather than to save time.
+- **spec_category=**: restrict identification to specific material
+  categories (`mineral`, `soil`, `rock`, `vegetation`, `water`,
+  `snow_ice`, `man_made`, `organic_compound`, `mixture`, `other`). Needs
+  **spec_server=**, since only the served index carries one normalised
+  category per record.
 - **spec_similarity_method=** (default `sam`, matching
   *i.hyper.speclookup*'s own default): Spectral Angle Mapper is usually
   the right choice here specifically because it is insensitive to a

@@ -128,6 +128,25 @@ it (e.g. to 0.01) if your sensor is known to have harmless, genuinely
 sparse per-pixel noise unrelated to a systematic band-level artifact. Set
 to 1.0 to disable entirely.</p>
 
+<h3>Storage scale (reflectance_scale)</h3>
+
+<p>Every 0.0-1.0 test in this module &mdash; <b>max_invalid_fraction</b>
+above, and the identification query sent to <em>i.hyper.speclookup</em>,
+which drops any value outside that range &mdash; assumes the cube holds
+reflectance as a fraction. Surface-reflectance products commonly ship
+scaled by 1000 or 10000 instead. Extraction itself does not care, since a
+common factor cancels out of every norm and simplex volume, but those two
+tests do: against a cube stored x10000 <i>every band</i> looks entirely out
+of range and the module stops with "All bands were excluded by
+max_invalid_fraction".</p>
+
+<p><b>reflectance_scale</b> (default 0) is the divisor that converts stored
+values to reflectance. At 0 it is detected from the cube's own value range
+and reported, using the same detector and the same thresholds as
+<em>i.hyper.spectroscopy</em>'s option of the same name, so one cube
+resolves to the same scale in both modules. Give it explicitly to override
+a wrong detection.</p>
+
 <h3>Identification against the shared spectral library (-i)</h3>
 
 <p><b>-i</b> identifies every extracted endmember against the shared local
@@ -163,13 +182,35 @@ improving the best match from <code>sam=55.7</code> (a poor fit) to
 excluded from the comparison.</p>
 
 <ul>
-  <li><b>spec_source_database=</b>, <b>spec_dataset_id=</b>: narrow the
+  <li><b>spec_server=</b>: identify against a spectral index server (e.g.
+    <code>http://127.0.0.1:8977</code>) instead of scanning a local
+    <b>spec_library=</b> tree, passed straight through to
+    <em>i.hyper.speclookup</em> <b>server=</b>. The server holds the whole
+    library resident as one normalised matrix and answers an exact search,
+    so identification costs milliseconds per endmember whatever the
+    library's size &mdash; which is what makes a quarter-million-record
+    library usable here at all. <b>spec_server=</b> and <b>spec_library=</b>
+    are alternatives: giving both warns and uses the server, rather than
+    leaving it ambiguous which one answered. Note that the served index
+    carries each record's identity but not its own spectrum, so <b>-p</b>
+    plots the extracted endmembers without the matched reference
+    overplotted.</li>
+<li><b>spec_source_database=</b>, <b>spec_dataset_id=</b>: narrow the
     search (e.g. to <code>usgs_splib07</code>'s mineral chapters for a
     geology scene, or <code>relab</code>'s <code>Rock</code>/<code>Mineral</code>
     categories) &mdash; the same filters <em>i.hyper.speclookup</em> itself
     takes, and for the same reason: matching against the full
     ~266,000-record library takes minutes, matching against one relevant
-    source/category takes seconds.</li>
+    source/category takes seconds. With <b>spec_server=</b> the
+    filters cost nothing either way, so they serve to express what the
+    scene can plausibly contain rather than to save time.</li>
+  <li><b>spec_category=</b>: restrict identification to specific material
+    categories (<code>mineral</code>, <code>soil</code>, <code>rock</code>,
+    <code>vegetation</code>, <code>water</code>, <code>snow_ice</code>,
+    <code>man_made</code>, <code>organic_compound</code>,
+    <code>mixture</code>, <code>other</code>). Needs <b>spec_server=</b>,
+    since only the served index carries one normalised category per
+    record.</li>
   <li><b>spec_similarity_method=</b> (default <code>sam</code>, matching
     <em>i.hyper.speclookup</em>'s own default): Spectral Angle Mapper is
     usually the right choice here specifically because it is insensitive
