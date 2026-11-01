@@ -177,6 +177,38 @@ pixel of the region and so needs the whole cube.</p>
 querying every pixel one by one, which is slower than the whole-region path;
 the module warns and carries on.</p>
 
+<h3>Cross-checking purity against local variability (homogeneity)</h3>
+
+<p>Extraction finds the most <i>extreme</i> spectra in the scene, which is
+not the same as the most <i>pure</i>. A pixel straddling two materials, or
+sitting on a shadow edge, is extreme in exactly the way N-FINDR and ATGP
+reward, and the spectrum it yields is a mixture no library will match
+well.</p>
+
+<p><b>homogeneity</b>=<em>raster</em> samples a 2D raster of local spectral
+variability at each selected pixel and attaches the value to every output as
+a <code>homogeneity</code> column (vector) or field (CSV/JSON), reporting it
+alongside the raster's own region mean:</p>
+
+<div class="code"><pre>
+Local variability from &lt;mosaic_sam5&gt; (region mean 0.305):
+Endmember 1: homogeneity=0.012 (0.04x region mean)
+Endmember 2: homogeneity=0.596 (1.95x region mean)
+</pre></div>
+
+<p>An endmember well below the region mean sits in a uniform neighbourhood
+and its spectrum is a plausible pure material; one well above it should be
+treated as a mixture or an edge, whatever its library match says.</p>
+
+<p>Any 2D raster is accepted and the value is attached exactly as stored:
+this module does not know which way round the given measure runs. A
+variance, standard deviation or mean-SAM map from
+<em>i.variance.opencl</em> measures variability, so there the <i>low</i>
+values mark the homogeneous pixels, as in the example above. A null at an
+endmember location is reported as null and written as an empty field, never
+as zero. The raster is checked to exist before the cube is read, so a typo
+costs nothing.</p>
+
 <h3>Identification against the shared spectral library (-i)</h3>
 
 <p><b>-i</b> identifies every extracted endmember against the shared local
@@ -595,15 +627,21 @@ Extracting 20 endmembers using NFINDR&hellip;
 Identified 20 of 20 endmember(s) (method=sam).
 </pre></div>
 
-<p>Spatial homogeneity from <em>i.variance.opencl</em> cross-checks the
-result: an endmember that sits in a locally heterogeneous neighbourhood is a
-mixed pixel or an edge, not a pure material.</p>
+<p>Spatial variability from <em>i.variance.opencl</em> cross-checks the
+result, fed straight into <b>homogeneity</b> so that each endmember carries
+it:</p>
 
 <div class="code"><pre>
 i.variance.opencl input_3d=mosaic_final method=sam_mean size=5 \
     output=mosaic_sam5
-r.what map=mosaic_sam5 points=c2rd_endmembers
+i.hyper.endmembers input=mosaic_final output=c2rd_endmembers \
+    n_endmembers=20 sample_size=50000 random_seed=42 \
+    reflectance_scale=10000 homogeneity=mosaic_sam5
 </pre></div>
+
+<p>An endmember whose <code>homogeneity</code> is far above the region mean
+sits in a heterogeneous neighbourhood and is a mixed pixel or an edge, not a
+pure material.</p>
 
 <h2>SEE ALSO</h2>
 
@@ -617,6 +655,7 @@ r.what map=mosaic_sam5 points=c2rd_endmembers
 <a href="i.hyper.geology.html">i.hyper.geology</a>,
 <a href="i.pysptools.unmix.html">i.pysptools.unmix</a>,
 <a href="i.variance.opencl.html">i.variance.opencl</a>,
+<a href="r.what.html">r.what</a>,
 <a href="r3.to.rast.html">r3.to.rast</a>,
 <a href="r3.what.html">r3.what</a>,
 <a href="m.proj.html">m.proj</a>

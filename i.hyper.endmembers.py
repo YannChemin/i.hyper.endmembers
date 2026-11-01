@@ -155,6 +155,14 @@
 # % guisection: Bands
 # %end
 
+# %option G_OPT_R_INPUT
+# % key: homogeneity
+# % required: no
+# % label: 2D raster of local spectral variability to sample at each endmember location
+# % description: Cross-checks that an endmember is a pure pixel and not merely an extreme one: a pixel sitting in a locally heterogeneous neighbourhood is usually a mixture or an edge. The value is sampled at each selected pixel and attached to the outputs as a homogeneity column/field, together with the raster's own region mean for scale. Any 2D raster is accepted and the value is reported exactly as stored -- a variance, stddev or mean-SAM map from i.variance.opencl measures variability, so there the LOW values are the homogeneous pixels
+# % guisection: Output
+# %end
+
 # %option
 # % key: wavelength_unit
 # % type: string
@@ -490,6 +498,45 @@ def sample_cube(raster3d: str, bands: list[dict], n_sample: int, rng,
     gs.message(f"Sampled {n_kept} valid of {cells.size} queried pixels "
               f"({len(bands)} bands).")
     return X[:n_kept], kept[:n_kept]
+
+def sample_raster_at(raster: str, xs, ys) -> np.ndarray:
+    """Value of a 2D raster at each endmember location, NaN where null.
+
+    Queried through r.what's JSON output rather than its plain text, whose
+    columns depend on the flags in use and whose value column is keyed by
+    the map name.
+    """
+    coords = ','.join(f"{x:.10f},{y:.10f}"
+                      for x, y in zip(xs.tolist(), ys.tolist()))
+    recs = json_module.loads(gs.read_command('r.what', map=raster,
+                                             coordinates=coords,
+                                             format='json', quiet=True))
+    if len(recs) != len(xs):
+        gs.fatal(f"r.what returned {len(recs)} values for {len(xs)} "
+                "endmember locations.")
+
+    vals = np.full(len(xs), np.nan, dtype=np.float64)
+    for i, rec in enumerate(recs):
+        for key, cell in rec.items():
+            if key in ('easting', 'northing', 'site_name'):
+                continue
+            value = cell.get('value') if isinstance(cell, dict) else cell
+            if value is not None:
+                vals[i] = float(value)
+            break
+    return vals
+
+
+def _raster_region_mean(raster: str) -> float | None:
+    """Mean of a 2D raster over the current region, or None if unavailable."""
+    from grass.exceptions import CalledModuleError
+
+    try:
+        stats = gs.parse_command('r.univar', map=raster, flags='g', quiet=True)
+        return float(stats['mean'])
+    except (CalledModuleError, KeyError, TypeError, ValueError):
+        gs.warning(f"Could not compute the region mean of <{raster}>.")
+        return None
 
 # ---------------------------------------------------------------------------
 # Band metadata (mirrors i.hyper.spectroscopy's get_band_info, for
@@ -1221,6 +1268,7 @@ def main(options, flags):
     identify = flags['i']
     refl_scale = float(options.get('reflectance_scale', '0') or '0')
     sample_size = int(options.get('sample_size', '0') or '0')
+    homogeneity_map = options.get('homogeneity', '')
     spec_library = options.get('spec_library', '')
     spec_server = options.get('spec_server', '')
     spec_source_databases = [s for s in (options.get('spec_source_database', '') or '').split(',') if s]
@@ -1245,6 +1293,12 @@ def main(options, flags):
 
     if sample_size < 0:
         gs.fatal("sample_size must be >= 0 (0 = use the whole region).")
+    if homogeneity_map and not gs.find_file(homogeneity_map,
+                                            element='cell')['file']:
+        # Checked here rather than at the r.what call, which comes after the
+        # cube has been read: on a large cube that is an hour of work lost.
+        gs.fatal(f"Raster map <{homogeneity_map}> not found.")
+
     if sample_size and abundance_prefix:
         gs.fatal("sample_size= cannot be combined with abundance_prefix=: "
                 "unmixing writes an abundance for every pixel of the region, "
@@ -1411,6 +1465,25 @@ def main(options, flags):
     xs = region['w'] + (cols + 0.5) * region['ewres']
     ys = region['n'] - (rows + 0.5) * region['nsres']
 
+    # --- Local variability at each endmember location ---------------------
+    homogeneity = None
+    if homogeneity_map:
+        homogeneity = sample_raster_at(homogeneity_map, xs, ys)
+        region_mean = _raster_region_mean(homogeneity_map)
+        if region_mean is None:
+            gs.message(f"Local variability from <{homogeneity_map}>:")
+        else:
+            gs.message(f"Local variability from <{homogeneity_map}> "
+                      f"(region mean {region_mean:.6g}):")
+        for i, val in enumerate(homogeneity):
+            if np.isnan(val):
+                gs.message(f"Endmember {i + 1}: homogeneity=null")
+            elif region_mean:
+                gs.message(f"Endmember {i + 1}: homogeneity={val:.6g} "
+                          f"({val / region_mean:.2f}x region mean)")
+            else:
+                gs.message(f"Endmember {i + 1}: homogeneity={val:.6g}")
+
     # --- Vector output -----------------------------------------------------
     field_names = _dedupe_names([_wl_field_name(wl, wavelength_unit) for wl in wavelengths])
 
@@ -1476,6 +1549,9 @@ def main(options, flags):
                         "" if m.get('match_overlap_bands') is None else str(m['match_overlap_bands']),
                         "" if m.get('match_margin') is None else f"{m['match_margin']:.6f}",
                     ]
+                if homogeneity is not None:
+                    row.append("" if np.isnan(homogeneity[i])
+                               else f"{homogeneity[i]:.6f}")
                 f.write('|'.join(row) + '\n')
 
         columns = "x double precision, y double precision, " + \
@@ -1487,6 +1563,8 @@ def main(options, flags):
                 "match_organization varchar(255), match_score double precision, "
                 "match_overlap_bands int, match_margin double precision"
             )
+        if homogeneity is not None:
+            columns += ", homogeneity double precision"
         gs.run_command('v.in.ascii', input=ascii_tmp, output=output_vector,
                        format='point', separator='pipe', x=1, y=2, cat=0,
                        columns=columns, overwrite=True, quiet=True)
@@ -1519,6 +1597,9 @@ def main(options, flags):
                     m = matches[i] or {}
                     for name in match_field_names:
                         rec[name] = m.get(name)
+                if homogeneity is not None:
+                    rec['homogeneity'] = (None if np.isnan(homogeneity[i])
+                                          else float(homogeneity[i]))
                 records.append(rec)
             with open(output_file, 'w') as f:
                 json_module.dump(records, f, indent=2)
@@ -1528,12 +1609,17 @@ def main(options, flags):
                 header = list(coord_names) + field_names
                 if identify:
                     header += match_field_names
+                if homogeneity is not None:
+                    header.append('homogeneity')
                 writer.writerow(header)
                 for i in range(n_endmembers):
                     row = [coord_pairs[i][0], coord_pairs[i][1]] + [float(v) for v in E[i]]
                     if identify:
                         m = matches[i] or {}
                         row += [m.get(name) for name in match_field_names]
+                    if homogeneity is not None:
+                        row.append(None if np.isnan(homogeneity[i])
+                                   else float(homogeneity[i]))
                     writer.writerow(row)
 
     # --- Optional abundance mapping (spectral unmixing) -------------------
