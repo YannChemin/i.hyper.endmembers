@@ -231,7 +231,7 @@
 # % type: integer
 # % required: no
 # % answer: 5
-# % description: Minimum overlapping bands required to consider a library candidate during identification (absolute floor). Only used with -i
+# % description: Minimum overlapping bands required to consider a library candidate during identification (absolute floor). With spec_server= it counts canonical grid points, and it is the threshold that holds whatever the cube's spectral gaps do to spec_min_overlap_fraction's denominator. Only used with -i
 # % guisection: Identification
 # %end
 
@@ -240,7 +240,7 @@
 # % type: double
 # % required: no
 # % answer: 0.55
-# % description: Minimum overlapping bands required, as a fraction (0-1) of the cube's own band count -- both this and spec_min_overlap_bands must be satisfied. An absolute floor alone does not scale to a hyperspectral cube: e.g. 13 overlapping bands is a weak, edge-of-range match out of 255 EMIT bands. Default requires a majority (>50%) of the cube's bands to be covered before a match is trusted. Only used with -i
+# % description: Minimum overlapping bands required, as a fraction (0-1) of the cube's own band count -- both this and spec_min_overlap_bands must be satisfied. An absolute floor alone does not scale to a hyperspectral cube: e.g. 13 overlapping bands is a weak, edge-of-range match out of 255 EMIT bands. Default requires a majority (>50%) of the cube's bands to be covered before a match is trusted. With spec_server= the fraction applies to the grid points the cube covers after resampling, which shrinks where the cube has spectral gaps: a 408-band cube covering 203 of 216 grid points needs 112 points at 0.55, the same cube missing both water-vapour windows covers 167 and needs only 92, so set spec_min_overlap_bands= for a floor that does not move. Only used with -i
 # % guisection: Identification
 # %end
 
