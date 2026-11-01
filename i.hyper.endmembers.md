@@ -164,13 +164,35 @@ half before extraction even starts, and the loaded cube would need ~100 GB
 at native 0.03 m resolution.
 
 **sample_size**=*n* instead reads *n* randomly chosen whole spectra with
-*r3.what*, which fetches only the voxels asked for: a few tens of thousands
-of spectra come back in seconds, with no per-band pass over the scene and
-memory of only *n* x bands x 4 bytes. The sampled cells are drawn without
-replacement from the region's own cell grid and depend on
+*r3.what*, which fetches only the voxels asked for, with no per-band pass
+over the scene and memory of only *n* x bands x 4 bytes. On the same cube,
+50000 sampled spectra at native 0.03 m took 367 s against about 5400 s of
+band slicing, and the whole run -- sampling, N-FINDR for 20 endmembers and
+20 identification queries -- took 6 min 12 s. The sampled cells are drawn
+without replacement from the region's own cell grid and depend on
 **random_seed**, so a run is reproducible; coordinates and spectra of the
 selected endmembers are identical to what the whole-region path reports for
 the same pixel.
+
+The cost is set by the cube's tile geometry, not by the band count. That
+mosaic is tiled 31x26x10 FCELL, so one 408-band spectrum spans 41 tiles and
+pulls about 1.3 MB to deliver 408 values. Scattered points share almost no
+tiles -- 50000 points over 61.7 M pixels is one per 1234, where a tile column
+covers 806 -- so the per-point cost is flat in the sample size and the reads
+add up to several times the size of the cube. Measured on this cube:
+
+```text
+5000 points scattered over the scene   39.0 s   7.80 ms/point
+5000 points inside one 300x300 block    2.8 s   0.57 ms/point
+```
+
+Locality is therefore worth a factor of 14, and a sample restricted to a
+smaller region costs far less per spectrum than a sample spread over a large
+one. Enlarging the raster3d tile cache
+(`RASTER3D_DEFAULT_CACHE_SIZE`/`RASTER3D_MAX_CACHE_SIZE`) does not help the
+scattered case, where the misses are compulsory rather than capacity
+misses: it measured slightly *slower* (45.5 s against 39.0 s), while on the
+clustered case it gave 1.5 s against 2.8 s.
 
 What a sample costs is coverage, not accuracy. Endmember extraction hunts
 for the few most extreme spectra in the scene, so a material covering a
@@ -622,11 +644,19 @@ i.hyper.endmembers input=mosaic_final output=c2rd_endmembers \
 ```
 
 ```text
-Sampling 50000 random pixels of 7284x8471 (408 bands)&hellip;
-Sampled 48610 valid of 50000 queried pixels (408 bands).
-Extracting 20 endmembers using NFINDR&hellip;
+Sampling 50000 random pixels of 7284x8471 (408 bands)...
+Sampled 27752 valid of 50000 queried pixels (408 bands).
+Reflectance scale detected: 10000 (stored value / 10000 = reflectance)
+WARNING: Dropping 238 of 27752 valid pixels that are null in at least one
+         band: the extraction algorithms cannot take a null. Bands with the
+         most nulls: 1252.3nm (0.33%), 1247.2nm (0.33%), 1257.4nm (0.33%)
+Extracting 20 endmembers using NFINDR...
 Identified 20 of 20 endmember(s) (method=sam).
 ```
+
+About 41% of that mosaic's bounding box is nodata, which is why 50000
+queried pixels yield 27752 spectra. The run took 6 min 12 s in total, of
+which 367 s was the sampling itself.
 
 Spatial variability from *i.variance.opencl* cross-checks the result, fed
 straight into **homogeneity** so that each endmember carries it:

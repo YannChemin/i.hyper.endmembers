@@ -116,7 +116,7 @@
 # % required: no
 # % answer: 0
 # % label: Extract endmembers from this many randomly sampled pixels instead of the whole region (0 = whole region)
-# % description: The whole-region path materialises one 2D raster per band with r3.to.rast, which pays for the full scene once per band; a sample reads only the voxels it asks for, with r3.what, so a few tens of thousands of whole spectra come back in seconds rather than hours. Endmember extraction looks for the few most extreme spectra, so a sample that misses a rare material cannot find it -- raise this, rather than lower it, when a material is expected but not found. Cannot be combined with abundance_prefix=
+# % description: The whole-region path materialises one 2D raster per band with r3.to.rast, which pays for the full scene once per band; a sample reads only the voxels it asks for, with r3.what. Measured on a 8471x7284x408 drone mosaic, 50000 sampled spectra cost 367 s against about 5400 s of band slicing, and the per-point cost is set by the cube tile geometry, so a sample spread over a large region costs far more per spectrum than one inside a small one (7.80 vs 0.57 ms per point). Endmember extraction looks for the few most extreme spectra, so a sample that misses a rare material cannot find it -- raise this, rather than lower it, when a material is expected but not found. Cannot be combined with abundance_prefix=
 # % guisection: Extraction
 # %end
 
